@@ -1,5 +1,5 @@
 // ==========================================
-// MDI SERVER V2.0 (GESTION MULTI-SALLES)
+// MDI SERVER V3.0 (SAAS + SÉCURITÉ VIP)
 // ==========================================
 const express = require('express');
 const http = require('http');
@@ -11,45 +11,60 @@ app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" } // Accepte tout le monde
+  cors: { origin: "*" }
 });
 
 app.get('/', (req, res) => {
-  res.send('MDI Live Server V2.0 (Rooms Active)');
+  res.send('MDI Live Server V3.0 (Secured)');
 });
 
-io.on('connection', (socket) => {
-  console.log('Nouvelle connexion:', socket.id);
+// --- 🔒 LISTE DES ABONNÉS (WHITELIST) ---
+// true = Accès autorisé
+// false = Accès bloqué (Impayé / Résilié)
+const CLIENTS_ACTIFS = {
+    "DEMO_CLIENT": true,    // Ton accès perso
+    "CLIENT_COCA": true,    // Exemple client actif
+    "CLIENT_PEPSI": false,  // Exemple client bloqué
+    "TEST_VIP": true
+};
 
-  // 1. REJOINDRE UNE SALLE SPÉCIFIQUE
-  // L'extension ou l'Overlay envoie : socket.emit('rejoindre_salle', 'CLIENT_COCA');
+io.on('connection', (socket) => {
+  console.log('Nouvelle connexion entrante:', socket.id);
+
+  // 1. DEMANDE D'ACCÈS À UNE SALLE
   socket.on('rejoindre_salle', (roomID) => {
-    if(roomID) {
+    
+    // VÉRIFICATION DE SÉCURITÉ
+    // On regarde si le client est dans la liste ET s'il est à "true"
+    if (CLIENTS_ACTIFS[roomID] === true) {
+        
+        // ✅ ACCÈS AUTORISÉ
         socket.join(roomID);
-        console.log(`Socket ${socket.id} a rejoint la salle : ${roomID}`);
+        console.log(`✅ Accès VALIDÉ pour : ${roomID}`);
+        socket.emit('statut_connexion', 'OK'); 
+        
+    } else {
+        
+        // ⛔ ACCÈS REFUSÉ
+        console.log(`⛔ Accès REFUSÉ pour : ${roomID} (Inconnu ou bloqué)`);
+        socket.emit('statut_connexion', 'REFUSE');
+        // Note: On ne le fait PAS rejoindre la socket.join()
     }
   });
 
-  // 2. RÉCEPTION ET RENVOI CIBLÉ
+  // 2. RÉCEPTION DES VOTES (inchangé)
   socket.on('nouveau_vote', (data) => {
-    
-    // CAS A : Mode SaaS (Objet avec Room) -> Futur standard
     if (typeof data === 'object' && data.room && data.vote) {
-      // On envoie UNIQUEMENT aux gens dans cette salle
-      io.to(data.room).emit('mise_a_jour_overlay', data.vote);
-      console.log(`[Salle ${data.room}] Vote relayé : ${data.vote}`);
-    }
-    
-    // CAS B : Mode Ancien (Juste du texte) -> Sécurité
-    // Si l'extension envoie juste "A", on l'envoie à tout le monde comme avant.
-    else if (typeof data === 'string') {
-       io.emit('mise_a_jour_overlay', data); 
-       console.log(`[Global] Vote legacy : ${data}`);
+      // On vérifie quand même que la salle émettrice est active (double sécurité)
+      if (CLIENTS_ACTIFS[data.room] === true) {
+          io.to(data.room).emit('mise_a_jour_overlay', data.vote);
+          console.log(`[Salle ${data.room}] Vote : ${data.vote}`);
+      }
     }
   });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Serveur écoute sur le port ${PORT}`);
+  console.log(`Serveur Sécurisé écoute sur le port ${PORT}`);
 });
