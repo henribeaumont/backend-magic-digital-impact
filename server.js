@@ -1,5 +1,5 @@
 // ==========================================
-// MDI SERVER V3.0 (SAAS + SÉCURITÉ VIP)
+// MDI SERVER V3.1 (SAAS + SÉCURITÉ VIP + REMOTE)
 // ==========================================
 const express = require('express');
 const http = require('http');
@@ -15,7 +15,7 @@ const io = new Server(server, {
 });
 
 app.get('/', (req, res) => {
-  res.send('MDI Live Server V3.0 (Secured)');
+  res.send('MDI Live Server V3.1 (Secured + Remote)');
 });
 
 // --- 🔒 LISTE DES ABONNÉS (WHITELIST) ---
@@ -31,7 +31,7 @@ const CLIENTS_ACTIFS = {
 io.on('connection', (socket) => {
   console.log('Nouvelle connexion entrante:', socket.id);
 
-  // 1. DEMANDE D'ACCÈS À UNE SALLE
+  // 1. DEMANDE D'ACCÈS À UNE SALLE (OVERLAY & TÉLÉCOMMANDE)
   socket.on('rejoindre_salle', (roomID) => {
     
     // VÉRIFICATION DE SÉCURITÉ
@@ -52,7 +52,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 2. RÉCEPTION DES VOTES (inchangé)
+  // 2. RÉCEPTION DES VOTES (Venant de l'extension Chrome)
   socket.on('nouveau_vote', (data) => {
     if (typeof data === 'object' && data.room && data.vote) {
       // On vérifie quand même que la salle émettrice est active (double sécurité)
@@ -62,6 +62,20 @@ io.on('connection', (socket) => {
       }
     }
   });
+
+  // 3. GESTION TÉLÉCOMMANDE (Venant du téléphone/web)
+  socket.on('commande_quiz', (data) => {
+    // data ressemble à { room: 'CLIENT_X', action: 'NEXT' }
+    
+    // Sécurité : On vérifie que la salle existe et est payée
+    if (data && data.room && CLIENTS_ACTIFS[data.room] === true) {
+        console.log(`📱 Télécommande [${data.room}] : ${data.action}`);
+        
+        // On renvoie l'ordre à tous les overlays de la salle
+        io.to(data.room).emit('ordre_quiz', data.action);
+    }
+  });
+
 });
 
 const PORT = process.env.PORT || 3000;
