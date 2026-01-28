@@ -27,7 +27,7 @@ app.get("/", (req, res) => {
 const CLIENTS_CONFIG = {
   DEMO_CLIENT: {
     active: true,
-    key: "demo_key_change_me",
+    key: "demo_key_123",
     entitlements: {
       quiz: true,
       wordcloud: true,
