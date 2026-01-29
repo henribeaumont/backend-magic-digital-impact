@@ -29,7 +29,7 @@ const CLIENTS_CONFIG = {
     active: true,
     key: "demo_key_123",
     entitlements: {
-      quiz: true,
+      quiz_ou_sondage: true,
       wordcloud: true,
       tug_of_war: true,
       confetti: true,
@@ -40,19 +40,19 @@ const CLIENTS_CONFIG = {
   CLIENT_COCA: {
     active: true,
     key: "coca_key_change_me",
-    entitlements: { quiz: true, wordcloud: true, tug_of_war: false, confetti: false }
+    entitlements: { quiz_ou_sondage: true, wordcloud: true, tug_of_war: false, confetti: false }
   },
 
   CLIENT_PEPSI: {
     active: false, // bloqué
     key: "pepsi_key_change_me",
-    entitlements: { quiz: false, wordcloud: false, tug_of_war: false, confetti: false }
+    entitlements: { quiz_ou_sondage: false, wordcloud: false, tug_of_war: false, confetti: false }
   },
 
   TEST_VIP: {
     active: true,
     key: "vip_key_change_me",
-    entitlements: { quiz: true, wordcloud: true, tug_of_war: true, confetti: true }
+    entitlements: { quiz_ou_sondage: true, wordcloud: true, tug_of_war: true, confetti: true }
   }
 };
 
