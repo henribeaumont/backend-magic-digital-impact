@@ -1,27 +1,27 @@
 // ==========================================
-// MDI SERVER V3.3 (SAFE + KEY + Supabase optional)
-// - ZÉRO RÉGRESSION : legacy OK (rejoindre_salle / nouveau_vote / commande_quiz)
-// - Mode SaaS : overlay:join + control:* avec roomKey obligatoire
-// - Supabase (optionnel) : si vars env présentes, validation clients via DB
+// MDI SERVER V3.3 (SAFE KEY + LEGACY + SUPABASE OPTIONAL)
+// - AUCUNE RÉGRESSION : legacy OK (rejoindre_salle / nouveau_vote / commande_quiz)
+// - Nouveau mode SaaS : overlay:join + control:set_state avec roomKey obligatoire
+// - Supabase optionnel : si variables présentes, charge la table "clients"
 // ==========================================
-
-require("dotenv").config();
 
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 
-let createClient = null;
+// dotenv (optionnel) : utile en local, inoffensif sur Render
 try {
-  ({ createClient } = require("@supabase/supabase-js"));
-} catch (e) {
-  // optional
-}
+  require("dotenv").config();
+} catch (_) {}
 
+const { createClient } = require("@supabase/supabase-js");
+
+// --------------------
+// Config de base serveur
+// --------------------
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
@@ -30,10 +30,22 @@ app.get("/", (req, res) => {
   res.send("MDI Live Server V3.3 (Safe Key + Legacy Compatible + Supabase optional)");
 });
 
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    version: "3.3",
+    supabaseEnabled: isSupabaseEnabled(),
+    clientsLoaded: Object.keys(CLIENTS_CONFIG).length
+  });
+});
+
 // ==================================================
-// 🔒 CONFIG CLIENTS (fallback local)
+// 🔒 CONFIG CLIENTS (mémoire serveur)
+// - Si Supabase ON : on remplit depuis la table "clients"
+// - Sinon : fallback hardcodé (pour ne pas tout casser)
 // ==================================================
-const CLIENTS_CONFIG = {
+let CLIENTS_CONFIG = {
+  // fallback minimal : te permet de tester même si Supabase est OFF
   DEMO_CLIENT: {
     active: true,
     key: "demo_key_123",
@@ -44,111 +56,81 @@ const CLIENTS_CONFIG = {
       confetti: true,
       emoji_tornado: true
     }
-  },
-
-  CLIENT_COCA: {
-    active: true,
-    key: "coca_key_change_me",
-    entitlements: { quiz_ou_sondage: true, wordcloud: true, tug_of_war: false, confetti: false }
-  },
-
-  CLIENT_PEPSI: {
-    active: false,
-    key: "pepsi_key_change_me",
-    entitlements: { quiz_ou_sondage: false, wordcloud: false, tug_of_war: false, confetti: false }
-  },
-
-  TEST_VIP: {
-    active: true,
-    key: "vip_key_change_me",
-    entitlements: { quiz_ou_sondage: true, wordcloud: true, tug_of_war: true, confetti: true }
   }
 };
 
-// ==================================================
-// 🧩 SUPABASE (optionnel)
-// ==================================================
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const USE_SUPABASE = Boolean(createClient && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-
-const supabase = USE_SUPABASE
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-  : null;
-
-// Cache pour éviter de spammer Supabase à chaque connexion overlay
-const CLIENT_CACHE = new Map(); // roomId -> { ts, data }
-const CLIENT_CACHE_TTL_MS = 15_000;
-
-async function getClientFromSupabase(roomId) {
-  const now = Date.now();
-  const cached = CLIENT_CACHE.get(roomId);
-  if (cached && now - cached.ts < CLIENT_CACHE_TTL_MS) return cached.data;
-
-  // ⚠️ IMPORTANT: ta table doit contenir au minimum:
-  // - room_id (text, unique)
-  // - active (bool)
-  // - room_key (text)  <-- si tu ne l'as pas encore, ajoute-la dans Supabase !
-  //
-  // (Optionnel pour plus tard) :
-  // - entitlements (jsonb) ex: {"quiz_ou_sondage": true, "confetti": true, ...}
-  const { data, error } = await supabase
-    .from("clients")
-    .select("room_id, active, room_key, entitlements")
-    .eq("room_id", roomId)
-    .maybeSingle();
-
-  if (error) {
-    console.log("⛔ [SUPABASE] error clients:", error.message);
-    CLIENT_CACHE.set(roomId, { ts: now, data: null });
-    return null;
-  }
-
-  CLIENT_CACHE.set(roomId, { ts: now, data });
-  return data;
+function isSupabaseEnabled() {
+  return (
+    typeof process.env.SUPABASE_URL === "string" &&
+    process.env.SUPABASE_URL.length > 10 &&
+    typeof process.env.SUPABASE_SERVICE_ROLE_KEY === "string" &&
+    process.env.SUPABASE_SERVICE_ROLE_KEY.length > 20
+  );
 }
 
-// ==================================================
-// ✅ Helpers d’autorisation (SUPABASE si dispo, sinon fallback local)
-// ==================================================
-async function isActive(roomId) {
-  if (USE_SUPABASE) {
-    const c = await getClientFromSupabase(roomId);
-    return c?.active === true;
+function getSupabaseClient() {
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+}
+
+// Charge clients depuis Supabase (table: clients)
+// Colonnes attendues : room_id (text), active (bool)
+// Optionnelles : room_key (text), entitlements (json/jsonb)
+async function refreshClientsFromSupabase() {
+  if (!isSupabaseEnabled()) return;
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clients")
+    .select("room_id, active, room_key, entitlements");
+
+  if (error) {
+    console.error("[SUPABASE] load clients error:", error.message || error);
+    return;
   }
+
+  const next = {};
+  for (const row of data || []) {
+    const roomId = row.room_id;
+    if (!roomId) continue;
+
+    next[roomId] = {
+      active: row.active === true,
+      key: typeof row.room_key === "string" ? row.room_key : null,
+      entitlements: (row.entitlements && typeof row.entitlements === "object") ? row.entitlements : {}
+    };
+  }
+
+  CLIENTS_CONFIG = next;
+  console.log(`[SUPABASE] clients loaded: ${Object.keys(CLIENTS_CONFIG).length}`);
+}
+
+// ✅ Compat : garde l’ancienne whitelist booléenne sans casser l’existant
+function isLegacyActive(roomId) {
   return CLIENTS_CONFIG?.[roomId]?.active === true;
 }
 
-async function isValidKey(roomId, key) {
-  if (typeof key !== "string" || key.length === 0) return false;
+// Mode strict : exige une key si définie en base
+function isValidKey(roomId, key) {
+  const expected = CLIENTS_CONFIG?.[roomId]?.key;
 
-  if (USE_SUPABASE) {
-    const c = await getClientFromSupabase(roomId);
-    // si room_key est absent (colonne non créée), ça refusera TOUJOURS
-    return typeof c?.room_key === "string" && c.room_key.length > 0 && c.room_key === key;
-  }
+  // Si aucune key en base -> on refuse le mode strict (sécurité)
+  if (!expected) return false;
 
-  return CLIENTS_CONFIG?.[roomId]?.key === key;
+  return typeof key === "string" && key.length > 0 && key === expected;
 }
 
-async function hasEntitlement(roomId, overlay) {
-  if (!overlay) return false;
-
-  if (USE_SUPABASE) {
-    const c = await getClientFromSupabase(roomId);
-    // si entitlements n’existe pas encore, on sécurise : false par défaut
-    // => à toi de mettre entitlements en DB, ou alors on peut décider "true par défaut" (moins safe).
-    const ent = c?.entitlements;
-    if (ent && typeof ent === "object") return ent?.[overlay] === true;
-    return false;
-  }
-
+function hasEntitlement(roomId, overlay) {
   const ent = CLIENTS_CONFIG?.[roomId]?.entitlements;
+
+  // Si pas de droits définis -> par défaut false (sécurité)
+  if (!ent) return false;
   return ent?.[overlay] === true;
 }
 
 // ==================================================
-// 🧠 MÉMOIRE SERVEUR (prépare multi-overlays / resync OBS)
+// 🧠 MÉMOIRE SERVEUR (multi-overlays / resync OBS)
 // ==================================================
 const ROOMS = Object.create(null);
 
@@ -157,7 +139,7 @@ function getRoom(roomId) {
     ROOMS[roomId] = {
       meta: { roomId, createdAt: Date.now() },
       overlays: {},       // overlayName -> { state, data, updatedAt }
-      participants: {},   // futur : dédup / votes
+      participants: {},
       timestamps: {}
     };
     console.log(`🆕 [ROOM] Créée: ${roomId}`);
@@ -174,54 +156,18 @@ function ensureOverlayState(roomId, overlay) {
 }
 
 // ==================================================
-// (OPTION) API REST pour télécommande / debug
-// - tu pourras l’utiliser plus tard côté télécommande SaaS
-// ==================================================
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, supabase: USE_SUPABASE });
-});
-
-// Exemple: /api/questions?room=DEMO_CLIENT&key=demo_key_123
-app.get("/api/questions", async (req, res) => {
-  if (!USE_SUPABASE) return res.status(501).json({ error: "supabase_not_configured" });
-
-  const room = String(req.query.room || "");
-  const key = String(req.query.key || "");
-
-  if (!room) return res.status(400).json({ error: "missing_room" });
-
-  const active = await isActive(room);
-  if (!active) return res.status(403).json({ error: "inactive" });
-
-  const okKey = await isValidKey(room, key);
-  if (!okKey) return res.status(403).json({ error: "invalid_key" });
-
-  // Table "questions" attendue
-  const { data, error } = await supabase
-    .from("questions")
-    .select("*")
-    .eq("room_id", room)
-    .eq("enabled", true)
-    .order("order_index", { ascending: true });
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ room, questions: data || [] });
-});
-
-// ==================================================
-// 🔌 SOCKET.IO
+// 🔌 SOCKETS
 // ==================================================
 io.on("connection", (socket) => {
-  console.log("🔌 Nouvelle connexion:", socket.id);
+  console.log("Nouvelle connexion:", socket.id);
 
   // --------------------------------------------------
-  // 1) LEGACY : rejoindre_salle (NE CASSE RIEN)
+  // 1) LEGACY : rejoindre_salle (overlay & télécommande)
   // --------------------------------------------------
-  socket.on("rejoindre_salle", async (roomID) => {
-    const ok = await isActive(roomID);
-    if (ok) {
+  socket.on("rejoindre_salle", (roomID) => {
+    if (isLegacyActive(roomID)) {
       socket.join(roomID);
-      console.log(`✅ [LEGACY] Accès VALIDÉ : ${roomID}`);
+      console.log(`✅ [LEGACY] Accès VALIDÉ pour : ${roomID}`);
       socket.emit("statut_connexion", "OK");
     } else {
       console.log(`⛔ [LEGACY] Accès REFUSÉ : ${roomID}`);
@@ -230,68 +176,55 @@ io.on("connection", (socket) => {
   });
 
   // --------------------------------------------------
-  // 2) SAAS PRO : overlay:join (AVEC KEY)
+  // 2) SAAS : overlay:join (mode strict avec key)
   // payload: { room, key, overlay }
   // --------------------------------------------------
-  socket.on("overlay:join", async (payload) => {
+  socket.on("overlay:join", (payload) => {
     const room = payload?.room;
     const key = payload?.key;
     const overlay = payload?.overlay;
 
-    if (!room || !overlay) return;
-
-    // abonnement
-    if (!(await isActive(room))) {
-      console.log(`⛔ [SAAS] overlay:join refusé (inactive): room=${room} overlay=${overlay}`);
-      socket.emit("overlay:forbidden", { reason: "inactive_subscription" });
+    if (!room || !overlay) {
+      socket.emit("overlay:forbidden");
       return;
     }
 
-    // clé
-    if (!(await isValidKey(room, key))) {
-      console.log(`⛔ [SAAS] overlay:join refusé (bad_key): room=${room} overlay=${overlay}`);
-      socket.emit("overlay:forbidden", { reason: "invalid_key" });
+    // 1) abonnement actif
+    if (!isLegacyActive(room)) {
+      socket.emit("overlay:forbidden");
+      console.log(`⛔ [SAAS] join refusé (inactive): room=${room} overlay=${overlay}`);
       return;
     }
 
-    // entitlement
-    if (!(await hasEntitlement(room, overlay))) {
-      console.log(`⛔ [SAAS] overlay:join refusé (no_entitlement): room=${room} overlay=${overlay}`);
-      socket.emit("overlay:forbidden", { reason: "no_entitlement", overlay });
+    // 2) key valide
+    if (!isValidKey(room, key)) {
+      socket.emit("overlay:forbidden");
+      console.log(`⛔ [SAAS] join refusé (bad key): room=${room} overlay=${overlay}`);
+      return;
+    }
+
+    // 3) droit overlay (si tu veux démarrer sans droits, mets tout à true en base)
+    if (!hasEntitlement(room, overlay)) {
+      socket.emit("overlay:forbidden");
+      console.log(`⛔ [SAAS] join refusé (no entitlement): room=${room} overlay=${overlay}`);
       return;
     }
 
     socket.join(room);
-    console.log(`🖥️ [SAAS] Overlay connecté: room=${room} overlay=${overlay}`);
 
-    const state = ensureOverlayState(room, overlay);
-    socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
+    // On envoie l’état courant pour “débloquer” l’overlay côté client
+    const st = ensureOverlayState(room, overlay);
+    socket.emit("overlay:state", { overlay, state: st.state, data: st.data });
+
+    console.log(`✅ [SAAS] join OK: room=${room} overlay=${overlay}`);
   });
 
   // --------------------------------------------------
-  // 3) SAAS : overlay:get_state (AVEC KEY)
-  // payload: { room, key, overlay }
+  // 3) LEGACY : votes (extension Chrome)
   // --------------------------------------------------
-  socket.on("overlay:get_state", async (payload) => {
-    const room = payload?.room;
-    const key = payload?.key;
-    const overlay = payload?.overlay;
-    if (!room || !overlay) return;
-
-    if (!(await isActive(room))) return;
-    if (!(await isValidKey(room, key))) return;
-    if (!(await hasEntitlement(room, overlay))) return;
-
-    const state = ensureOverlayState(room, overlay);
-    socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
-  });
-
-  // --------------------------------------------------
-  // 4) LEGACY : votes (extension Chrome)
-  // --------------------------------------------------
-  socket.on("nouveau_vote", async (data) => {
+  socket.on("nouveau_vote", (data) => {
     if (typeof data === "object" && data.room && data.vote) {
-      if (await isActive(data.room)) {
+      if (isLegacyActive(data.room)) {
         io.to(data.room).emit("mise_a_jour_overlay", data.vote);
         console.log(`[Salle ${data.room}] Vote : ${data.vote}`);
       }
@@ -299,20 +232,20 @@ io.on("connection", (socket) => {
   });
 
   // --------------------------------------------------
-  // 5) LEGACY : télécommande quiz (NE CASSE RIEN)
+  // 4) LEGACY : télécommande quiz
   // --------------------------------------------------
-  socket.on("commande_quiz", async (data) => {
-    if (data && data.room && (await isActive(data.room))) {
+  socket.on("commande_quiz", (data) => {
+    if (data && data.room && isLegacyActive(data.room)) {
       console.log(`📱 [LEGACY] Télécommande [${data.room}] : ${data.action}`);
       io.to(data.room).emit("ordre_quiz", data.action);
     }
   });
 
   // --------------------------------------------------
-  // 6) SAAS PRO : control:set_state (AVEC KEY)
+  // 5) SAAS : control:set_state (AVEC KEY)
   // payload: { room, key, overlay, state, data }
   // --------------------------------------------------
-  socket.on("control:set_state", async (payload) => {
+  socket.on("control:set_state", (payload) => {
     const room = payload?.room;
     const key = payload?.key;
     const overlay = payload?.overlay;
@@ -320,10 +253,9 @@ io.on("connection", (socket) => {
     const data = payload?.data;
 
     if (!room || !overlay || !state) return;
-
-    if (!(await isActive(room))) return;
-    if (!(await isValidKey(room, key))) return;
-    if (!(await hasEntitlement(room, overlay))) return;
+    if (!isLegacyActive(room)) return;
+    if (!isValidKey(room, key)) return;
+    if (!hasEntitlement(room, overlay)) return;
 
     const overlayState = ensureOverlayState(room, overlay);
     overlayState.state = state;
@@ -335,8 +267,23 @@ io.on("connection", (socket) => {
   });
 });
 
+// ==================================================
+// 🚀 START
+// ==================================================
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+
+server.listen(PORT, async () => {
   console.log(`🚀 MDI Server V3.3 écoute sur le port ${PORT}`);
-  console.log(`ℹ️ Supabase mode: ${USE_SUPABASE ? "ON" : "OFF (fallback CLIENTS_CONFIG)"}`);
+
+  if (isSupabaseEnabled()) {
+    console.log("🧩 Supabase mode: ON");
+    await refreshClientsFromSupabase();
+
+    // refresh régulier (simple + robuste)
+    setInterval(() => {
+      refreshClientsFromSupabase().catch(() => {});
+    }, 60_000);
+  } else {
+    console.log("🧩 Supabase mode: OFF (fallback hardcodé actif)");
+  }
 });
