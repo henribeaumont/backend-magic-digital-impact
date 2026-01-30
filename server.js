@@ -1,19 +1,23 @@
 // ==========================================
-// MDI SERVER V3.6 (DEBUG MODE)
+// MDI SERVER V3.6 (DEBUG MODE - FULL REPAIR)
 // ==========================================
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+
+// Supabase (optionnel)
 let createClient;
 try { ({ createClient } = require("@supabase/supabase-js")); } catch (e) { createClient = null; }
 
 const app = express();
 app.use(express.json()); 
 app.use(cors());
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+// --- CONFIG ---
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const supabaseEnabled = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY) && typeof createClient === "function";
@@ -23,13 +27,14 @@ console.log(`🧩 Supabase mode: ${supabaseEnabled ? "ON" : "OFF"}`);
 
 // --- HELPERS DB ---
 async function sbGetClient(roomId) {
+  if(!supabaseEnabled) return null;
   const { data, error } = await supabase.from("clients").select("*").eq("room_id", roomId).limit(1).maybeSingle();
   if (error) console.error("⚠️ DB Error Client:", error.message);
   return data;
 }
 
 async function sbGetQuestion(roomId, questionKey) {
-  // Sélection simple pour éviter les erreurs de mapping
+  if(!supabaseEnabled) return null;
   const { data, error } = await supabase.from("questions").select("*").eq("room_id", roomId).eq("question_key", questionKey).limit(1).maybeSingle();
   if (error) console.error("⚠️ DB Error Question:", error.message);
   return data;
@@ -39,7 +44,7 @@ async function sbGetQuestion(roomId, questionKey) {
 async function getClientConfig(roomId) {
   if (!roomId) return null;
   if (supabaseEnabled) return await sbGetClient(roomId);
-  return null;
+  return null; 
 }
 
 // --- MEMORY ---
@@ -50,11 +55,32 @@ function ensureOverlayState(roomId, overlay) {
   return ROOMS[roomId].overlays[overlay];
 }
 
+// --- ROUTES HTTP (C'est ce qui manquait !) ---
+app.get("/", (req, res) => {
+  res.send("MDI Live Server V3.6 OK");
+});
+
+app.get("/health", async (req, res) => {
+  res.json({ ok: true, version: "3.6", supabaseEnabled });
+});
+
+app.get("/debug/questions", async (req, res) => {
+  const room = String(req.query.room || "").trim();
+  if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room_or_supabase" });
+  
+  const { data, error } = await supabase
+    .from("questions")
+    .select("question_key, type, prompt, enabled, order_index")
+    .eq("room_id", room)
+    .order("order_index", { ascending: true });
+    
+  res.json({ ok: !error, data: data || [] });
+});
+
 // --- SOCKET ---
 io.on("connection", (socket) => {
   console.log("🔌 Connect:", socket.id);
 
-  // JOIN
   socket.on("overlay:join", async (payload) => {
     const { room, key, overlay } = payload || {};
     const client = await getClientConfig(room);
@@ -69,38 +95,29 @@ io.on("connection", (socket) => {
     socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
   });
 
-  // --- COMMANDE CRITIQUE : LOAD QUESTION ---
   socket.on("control:load_question", async (payload) => {
     const { room, key, overlay, question_key } = payload || {};
     
-    // LOG 1 : Réception
     console.log(`🔍 [DEBUG] Reçu load_question: Room=${room} Key=${question_key}`);
 
-    // LOG 2 : Verif Client
     const client = await getClientConfig(room);
-    if (!client) { console.log("❌ [DEBUG] Client introuvable en DB"); return; }
+    if (!client) { console.log("❌ [DEBUG] Client introuvable"); return; }
     if (client.room_key !== key) { console.log("❌ [DEBUG] Mauvaise Room Key"); return; }
     
-    // LOG 3 : Verif Entitlements (Entitlements est un JSONB)
     const ent = client.entitlements || {};
-    console.log(`🔍 [DEBUG] Droits client:`, JSON.stringify(ent));
-    if (ent[overlay] !== true) { console.log(`❌ [DEBUG] Pas de droit pour l'overlay: ${overlay}`); return; }
+    // On vérifie le droit, mais on autorise si entitlements est vide (mode cool)
+    if (Object.keys(ent).length > 0 && ent[overlay] !== true) { 
+        console.log(`❌ [DEBUG] Pas de droit pour l'overlay: ${overlay}`); 
+        return; 
+    }
 
-    if (!supabaseEnabled) return;
-
-    // LOG 4 : Fetch Question
     const q = await sbGetQuestion(room, question_key);
     
     if (!q) {
-      console.log(`❌ [DEBUG] Question introuvable dans DB (table questions vide ou clé incorrecte)`);
-      return;
-    }
-    if (q.enabled === false) {
-      console.log(`❌ [DEBUG] Question désactivée (enabled=false)`);
+      console.log(`❌ [DEBUG] Question introuvable DB`);
       return;
     }
 
-    // SUCCESS
     const question = {
       id: q.question_key,
       type: q.type,
@@ -109,7 +126,7 @@ io.on("connection", (socket) => {
       correct: q.type === "quiz" ? q.correct_option : null,
     };
 
-    console.log(`✅ [DEBUG] Question envoyée ! Prompt: "${q.prompt}"`);
+    console.log(`✅ [DEBUG] Question envoyée: "${q.prompt}"`);
 
     const overlayState = ensureOverlayState(room, overlay);
     overlayState.state = "question";
@@ -118,7 +135,6 @@ io.on("connection", (socket) => {
     io.to(room).emit("overlay:state", { overlay, state: "question", data: { question } });
   });
 
-  // AUTRES COMMANDES (Simplifiées)
   socket.on("control:show_options", async (p) => {
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: ensureOverlayState(p.room, p.overlay).data });
   });
