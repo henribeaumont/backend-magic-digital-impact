@@ -1,12 +1,12 @@
 // ==========================================
-// MDI SERVER V3.6 (DEBUG MODE - FULL REPAIR)
+// MDI SERVER V4.0 (ADMIN API + SAAS READY)
 // ==========================================
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 
-// Supabase (optionnel)
+// Supabase
 let createClient;
 try { ({ createClient } = require("@supabase/supabase-js")); } catch (e) { createClient = null; }
 
@@ -23,31 +23,94 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const supabaseEnabled = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY) && typeof createClient === "function";
 const supabase = supabaseEnabled ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
 
+// SECRET ADMIN (Change-le si tu veux plus de sécu, mais suffisant pour commencer)
+const ADMIN_SECRET = "MDI_SUPER_ADMIN_2026";
+
 console.log(`🧩 Supabase mode: ${supabaseEnabled ? "ON" : "OFF"}`);
 
 // --- HELPERS DB ---
 async function sbGetClient(roomId) {
   if(!supabaseEnabled) return null;
-  const { data, error } = await supabase.from("clients").select("*").eq("room_id", roomId).limit(1).maybeSingle();
-  if (error) console.error("⚠️ DB Error Client:", error.message);
+  const { data } = await supabase.from("clients").select("*").eq("room_id", roomId).limit(1).maybeSingle();
   return data;
 }
-
 async function sbGetQuestion(roomId, questionKey) {
   if(!supabaseEnabled) return null;
-  const { data, error } = await supabase.from("questions").select("*").eq("room_id", roomId).eq("question_key", questionKey).limit(1).maybeSingle();
-  if (error) console.error("⚠️ DB Error Question:", error.message);
+  const { data } = await supabase.from("questions").select("*").eq("room_id", roomId).eq("question_key", questionKey).limit(1).maybeSingle();
   return data;
 }
 
-// --- LOGIC AUTH ---
-async function getClientConfig(roomId) {
-  if (!roomId) return null;
-  if (supabaseEnabled) return await sbGetClient(roomId);
-  return null; 
+// --- API ADMIN (NOUVEAU V4.0) ---
+// Middleware de sécurité simple
+function requireAdmin(req, res, next) {
+  const secret = req.headers["x-admin-secret"];
+  if (secret !== ADMIN_SECRET) return res.status(403).json({ ok: false, error: "Forbidden: Bad Secret" });
+  next();
 }
 
-// --- MEMORY ---
+// 1. Lister tout (Clients + Questions)
+app.get("/api/admin/data", requireAdmin, async (req, res) => {
+  if (!supabaseEnabled) return res.json({ ok: false, error: "no_db" });
+  
+  const { data: clients } = await supabase.from("clients").select("*").order("created_at", { ascending: false });
+  const { data: questions } = await supabase.from("questions").select("*").order("room_id").order("order_index");
+  
+  res.json({ ok: true, clients: clients || [], questions: questions || [] });
+});
+
+// 2. Créer/Modifier Client
+app.post("/api/admin/client", requireAdmin, async (req, res) => {
+  const { room_id, room_key, entitlements, active } = req.body;
+  if (!supabaseEnabled) return res.json({ ok: false, error: "no_db" });
+
+  // Upsert (Insert ou Update si existe)
+  const { error } = await supabase.from("clients").upsert({
+    room_id, room_key, active, entitlements, created_at: new Date()
+  }, { onConflict: "room_id" });
+
+  if (error) return res.json({ ok: false, error: error.message });
+  res.json({ ok: true });
+});
+
+// 3. Créer/Modifier Question
+app.post("/api/admin/question", requireAdmin, async (req, res) => {
+  const q = req.body; // doit contenir room_id, question_key, etc.
+  if (!supabaseEnabled) return res.json({ ok: false, error: "no_db" });
+
+  // On force created_at pour l'ordre si nouveau
+  const payload = { ...q, created_at: new Date() };
+  
+  const { error } = await supabase.from("questions").upsert(payload, { onConflict: "room_id, question_key" });
+  if (error) return res.json({ ok: false, error: error.message });
+  res.json({ ok: true });
+});
+
+// 4. Supprimer Question
+app.post("/api/admin/delete-question", requireAdmin, async (req, res) => {
+  const { room_id, question_key } = req.body;
+  if (!supabaseEnabled) return res.json({ ok: false, error: "no_db" });
+
+  const { error } = await supabase.from("questions").delete().match({ room_id, question_key });
+  if (error) return res.json({ ok: false, error: error.message });
+  res.json({ ok: true });
+});
+
+
+// --- ROUTES PUBLIC ---
+app.get("/", (req, res) => res.send("MDI Live Server V4.0 (Admin Ready)"));
+app.get("/health", (req, res) => res.json({ ok: true, version: "4.0", supabaseEnabled }));
+app.get("/debug/questions", async (req, res) => {
+  const room = String(req.query.room || "").trim();
+  if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room_or_supabase" });
+  const { data } = await supabase.from("questions").select("*").eq("room_id", room).order("order_index");
+  res.json({ ok: true, data: data || [] });
+});
+
+// --- SOCKET LOGIC ---
+async function getClientConfig(roomId) {
+  if (!roomId || !supabaseEnabled) return null;
+  return await sbGetClient(roomId);
+}
 const ROOMS = Object.create(null);
 function ensureOverlayState(roomId, overlay) {
   if (!ROOMS[roomId]) ROOMS[roomId] = { overlays: {} };
@@ -55,68 +118,29 @@ function ensureOverlayState(roomId, overlay) {
   return ROOMS[roomId].overlays[overlay];
 }
 
-// --- ROUTES HTTP (C'est ce qui manquait !) ---
-app.get("/", (req, res) => {
-  res.send("MDI Live Server V3.6 OK");
-});
-
-app.get("/health", async (req, res) => {
-  res.json({ ok: true, version: "3.6", supabaseEnabled });
-});
-
-app.get("/debug/questions", async (req, res) => {
-  const room = String(req.query.room || "").trim();
-  if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room_or_supabase" });
-  
-  const { data, error } = await supabase
-    .from("questions")
-    .select("question_key, type, prompt, enabled, order_index")
-    .eq("room_id", room)
-    .order("order_index", { ascending: true });
-    
-  res.json({ ok: !error, data: data || [] });
-});
-
-// --- SOCKET ---
 io.on("connection", (socket) => {
   console.log("🔌 Connect:", socket.id);
 
-  socket.on("overlay:join", async (payload) => {
-    const { room, key, overlay } = payload || {};
+  socket.on("overlay:join", async (p) => {
+    const { room, key, overlay } = p || {};
     const client = await getClientConfig(room);
+    if (!client || !client.active || client.room_key !== key) return socket.emit("overlay:forbidden", { reason: "auth" });
+    const ent = client.entitlements || {};
+    if (Object.keys(ent).length > 0 && ent[overlay] !== true) return socket.emit("overlay:forbidden", { reason: "entitlements" });
     
-    // Auth basique
-    if (!client || !client.active || client.room_key !== key) {
-      socket.emit("overlay:forbidden", { reason: "auth_failed" });
-      return;
-    }
     socket.join(room);
-    const state = ensureOverlayState(room, overlay);
-    socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
+    const s = ensureOverlayState(room, overlay);
+    socket.emit("overlay:state", { overlay, state: s.state, data: s.data });
   });
 
-  socket.on("control:load_question", async (payload) => {
-    const { room, key, overlay, question_key } = payload || {};
-    
-    console.log(`🔍 [DEBUG] Reçu load_question: Room=${room} Key=${question_key}`);
-
+  socket.on("control:load_question", async (p) => {
+    const { room, key, overlay, question_key } = p || {};
+    console.log(`🔍 Load Q: ${room} / ${question_key}`);
     const client = await getClientConfig(room);
-    if (!client) { console.log("❌ [DEBUG] Client introuvable"); return; }
-    if (client.room_key !== key) { console.log("❌ [DEBUG] Mauvaise Room Key"); return; }
+    if (!client || client.room_key !== key) return;
     
-    const ent = client.entitlements || {};
-    // On vérifie le droit, mais on autorise si entitlements est vide (mode cool)
-    if (Object.keys(ent).length > 0 && ent[overlay] !== true) { 
-        console.log(`❌ [DEBUG] Pas de droit pour l'overlay: ${overlay}`); 
-        return; 
-    }
-
     const q = await sbGetQuestion(room, question_key);
-    
-    if (!q) {
-      console.log(`❌ [DEBUG] Question introuvable DB`);
-      return;
-    }
+    if (!q) return console.log("❌ Q not found");
 
     const question = {
       id: q.question_key,
@@ -125,28 +149,20 @@ io.on("connection", (socket) => {
       options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
       correct: q.type === "quiz" ? q.correct_option : null,
     };
-
-    console.log(`✅ [DEBUG] Question envoyée: "${q.prompt}"`);
-
-    const overlayState = ensureOverlayState(room, overlay);
-    overlayState.state = "question";
-    overlayState.data = { question };
-    
-    io.to(room).emit("overlay:state", { overlay, state: "question", data: { question } });
+    const s = ensureOverlayState(room, overlay);
+    s.state = "question"; s.data = { question };
+    io.to(room).emit("overlay:state", { overlay, state: "question", data: s.data });
   });
 
-  socket.on("control:show_options", async (p) => {
-    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: ensureOverlayState(p.room, p.overlay).data });
+  // Helpers
+  socket.on("control:show_options", (p) => io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: ensureOverlayState(p.room, p.overlay).data }));
+  socket.on("control:set_state", (p) => {
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = p.state;
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: s.data });
   });
-  socket.on("control:set_state", async (p) => {
-    const os = ensureOverlayState(p.room, p.overlay);
-    os.state = p.state;
-    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: os.data });
-  });
-  socket.on("control:idle", async (p) => {
-    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
-  });
+  socket.on("control:idle", (p) => io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} }));
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server V3.6 (DEBUG) on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server V4.0 (Admin) on ${PORT}`));
