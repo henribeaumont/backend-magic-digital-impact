@@ -1,5 +1,5 @@
 // ============================================================
-// MDI SERVER V5.3 (SAAS + WATCHTOWER + REMOTE FIX)
+// MDI SERVER V5.4 (FINAL STABLE - WINNER & STATE FIX)
 // ============================================================
 const express = require("express");
 const http = require("http");
@@ -22,7 +22,7 @@ const ADMIN_SECRET = "MDI_SUPER_ADMIN_2026";
 const supabaseEnabled = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY) && typeof createClient === "function";
 const supabase = supabaseEnabled ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
 
-// --- MEMORY (Votes RAM) ---
+// --- MEMORY ---
 const ROOMS = Object.create(null);
 function getRoom(id) {
   if (!ROOMS[id]) ROOMS[id] = { overlays: {}, votes: { A:0, B:0, C:0, D:0, total:0 } };
@@ -58,10 +58,9 @@ async function manualSaveQuestion(qData) {
 }
 
 // --- ROUTES ---
-app.get("/", (req, res) => res.send("MDI Server V5.3 (Remote Fixed)"));
-app.get("/health", (req, res) => res.json({ ok: true, version: "5.3" }));
+app.get("/", (req, res) => res.send("MDI Server V5.4 (Stable)"));
+app.get("/health", (req, res) => res.json({ ok: true, version: "5.4" }));
 
-// C'EST CETTE ROUTE QUI MANQUAIT POUR LA TÉLÉCOMMANDE !
 app.get("/debug/questions", async (req, res) => {
   const room = String(req.query.room || "").trim();
   if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room" });
@@ -106,26 +105,21 @@ app.post("/api/client/delete-question", requireClientAuth, async (req, res) => {
 // --- SOCKET ---
 io.on("connection", (socket) => {
   
-  // 1. Overlay & Remote
+  // 1. JOIN
   socket.on("overlay:join", async (p) => {
     if(!supabaseEnabled) return;
     const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
     if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", {reason:"auth"});
     socket.join(p.room);
     const s = ensureOverlayState(p.room, p.overlay);
-    // Renvoi des votes actuels si existants
     const r = getRoom(p.room);
     if (r.votes.total > 0) s.data.percents = calculatePercents(r.votes);
     socket.emit("overlay:state", { overlay: p.overlay, state: s.state, data: s.data });
   });
 
-  // 2. Watchtower (Extension)
-  socket.on("rejoindre_salle", (roomId) => {
-    console.log(`📡 Watchtower: ${roomId}`);
-    socket.join(roomId);
-  });
+  socket.on("rejoindre_salle", (roomId) => socket.join(roomId));
 
-  // 3. Votes (Watchtower)
+  // 2. VOTES (Avec préservation de l'état)
   socket.on("nouveau_vote", (payload) => {
     const room = payload.room;
     let rawVote = String(payload.vote || "").trim().toUpperCase();
@@ -139,17 +133,19 @@ io.on("connection", (socket) => {
       const r = getRoom(room);
       r.votes[choice]++;
       r.votes.total++;
-      console.log(`🗳️ VOTE: ${choice} (Total: ${r.votes.total})`);
+      
       const s = ensureOverlayState(room, "quiz_ou_sondage");
       s.data.percents = calculatePercents(r.votes);
+      
+      // FIX 1: On utilise s.state qui est maintenant correctement mis à jour
       io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: s.state, data: s.data });
     }
   });
 
-  // 4. Remote Controls
+  // 3. REMOTE CONTROL
   socket.on("control:load_question", async (p) => {
     const r = getRoom(p.room);
-    r.votes = { A:0, B:0, C:0, D:0, total:0 }; // Reset votes
+    r.votes = { A:0, B:0, C:0, D:0, total:0 };
     
     const { data: q } = await supabase.from("questions").select("*").eq("room_id", p.room).eq("question_key", p.question_key).maybeSingle();
     if (!q) return;
@@ -164,12 +160,47 @@ io.on("connection", (socket) => {
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "question", data: s.data });
   });
 
-  socket.on("control:show_options", (p) => io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: ensureOverlayState(p.room, p.overlay).data }));
+  // FIX 2: On sauvegarde l'état "options" en mémoire
+  socket.on("control:show_options", (p) => {
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "options"; // <--- SAUVEGARDE CRITIQUE
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: s.data });
+  });
+
+  // FIX 3: Calcul du Gagnant
   socket.on("control:set_state", (p) => {
-    const s = ensureOverlayState(p.room, p.overlay); s.state = p.state;
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = p.state;
+
+    // Si on demande le gagnant, on calcule le texte à afficher
+    if (p.state === "winner") {
+      const q = s.data.question;
+      let winnerText = "Gagnant"; // Défaut
+
+      if (q && q.type === "quiz" && q.correct) {
+        // Quiz : Le gagnant est la bonne réponse
+        winnerText = q.options[q.correct] || ("Option " + q.correct);
+      } 
+      else if (q && q.type === "poll") {
+        // Sondage : Le gagnant est le plus voté
+        const r = getRoom(p.room);
+        const votes = r.votes;
+        const max = Math.max(votes.A, votes.B, votes.C, votes.D);
+        // On trouve qui a le max (A, B, C ou D)
+        const winnerKey = ["A","B","C","D"].find(k => votes[k] === max);
+        winnerText = q.options[winnerKey] || "Egalité";
+      }
+      s.data.winnerName = winnerText;
+    }
+
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: s.data });
   });
-  socket.on("control:idle", (p) => io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} }));
+  
+  socket.on("control:idle", (p) => {
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "idle";
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
+  });
 });
 
 function calculatePercents(votes) {
@@ -183,4 +214,4 @@ function calculatePercents(votes) {
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server V5.3 (Fixed) on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server V5.4 (Winner Fix) on ${PORT}`));
