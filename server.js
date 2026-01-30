@@ -1,5 +1,5 @@
 // ============================================================
-// MDI SERVER V5.2 (SAAS + WATCHTOWER COMPATIBILITY)
+// MDI SERVER V5.3 (SAAS + WATCHTOWER + REMOTE FIX)
 // ============================================================
 const express = require("express");
 const http = require("http");
@@ -22,25 +22,19 @@ const ADMIN_SECRET = "MDI_SUPER_ADMIN_2026";
 const supabaseEnabled = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY) && typeof createClient === "function";
 const supabase = supabaseEnabled ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
 
-// --- MEMORY (Stockage des votes en RAM) ---
+// --- MEMORY (Votes RAM) ---
 const ROOMS = Object.create(null);
-
 function getRoom(id) {
-  if (!ROOMS[id]) ROOMS[id] = { 
-    overlays: {}, 
-    votes: { A:0, B:0, C:0, D:0, total:0 }, // Compteur de votes
-    history: new Set() // Anti-doublon basique (facultatif ici)
-  };
+  if (!ROOMS[id]) ROOMS[id] = { overlays: {}, votes: { A:0, B:0, C:0, D:0, total:0 } };
   return ROOMS[id];
 }
-
 function ensureOverlayState(roomId, overlay) {
   const r = getRoom(roomId);
   if (!r.overlays[overlay]) r.overlays[overlay] = { state: "idle", data: {} };
   return r.overlays[overlay];
 }
 
-// --- MIDDLEWARES API ---
+// --- MIDDLEWARES ---
 function requireAdmin(req, res, next) {
   if (req.headers["x-admin-secret"] !== ADMIN_SECRET) return res.status(403).json({ ok: false, error: "Bad Secret" });
   next();
@@ -63,11 +57,19 @@ async function manualSaveQuestion(qData) {
   else return (await supabase.from("questions").insert([qData])).error;
 }
 
-// --- API ROUTES (ADMIN & CLIENT) ---
-app.get("/", (req, res) => res.send("MDI Server V5.2 (Watchtower Ready)"));
-app.get("/health", (req, res) => res.json({ ok: true, version: "5.2" }));
+// --- ROUTES ---
+app.get("/", (req, res) => res.send("MDI Server V5.3 (Remote Fixed)"));
+app.get("/health", (req, res) => res.json({ ok: true, version: "5.3" }));
 
-// Admin
+// C'EST CETTE ROUTE QUI MANQUAIT POUR LA TÉLÉCOMMANDE !
+app.get("/debug/questions", async (req, res) => {
+  const room = String(req.query.room || "").trim();
+  if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room" });
+  const { data } = await supabase.from("questions").select("*").eq("room_id", room).order("order_index");
+  res.json({ ok: true, data: data || [] });
+});
+
+// Admin API
 app.get("/api/admin/data", requireAdmin, async (req, res) => {
   const { data: c } = await supabase.from("clients").select("*").order("created_at");
   const { data: q } = await supabase.from("questions").select("*").order("room_id").order("order_index");
@@ -86,7 +88,7 @@ app.post("/api/admin/delete-question", requireAdmin, async (req, res) => {
   res.json({ ok: !error, error: error?.message });
 });
 
-// Client Editor
+// Client API
 app.get("/api/client/questions", requireClientAuth, async (req, res) => {
   const { data } = await supabase.from("questions").select("*").eq("room_id", req.client.room_id).order("order_index");
   res.json({ ok: true, questions: data || [] });
@@ -101,40 +103,32 @@ app.post("/api/client/delete-question", requireClientAuth, async (req, res) => {
   res.json({ ok: !error, error: error?.message });
 });
 
-// --- SOCKET.IO ---
+// --- SOCKET ---
 io.on("connection", (socket) => {
   
-  // 1. CONNEXION OVERLAY & REMOTE (Standard V5)
+  // 1. Overlay & Remote
   socket.on("overlay:join", async (p) => {
     if(!supabaseEnabled) return;
     const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
     if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", {reason:"auth"});
     socket.join(p.room);
     const s = ensureOverlayState(p.room, p.overlay);
-    
-    // Si des votes existent déjà, on les renvoie
+    // Renvoi des votes actuels si existants
     const r = getRoom(p.room);
-    if (r.votes.total > 0) {
-      s.data.percents = calculatePercents(r.votes);
-    }
+    if (r.votes.total > 0) s.data.percents = calculatePercents(r.votes);
     socket.emit("overlay:state", { overlay: p.overlay, state: s.state, data: s.data });
   });
 
-  // 2. CONNEXION WATCHTOWER (Extension Chrome)
+  // 2. Watchtower (Extension)
   socket.on("rejoindre_salle", (roomId) => {
-    // L'extension envoie juste le Room ID. On accepte sans clé (mode souple pour l'extension)
-    // ou on pourrait vérifier si le room existe en RAM.
-    console.log(`📡 Watchtower connecté sur : ${roomId}`);
+    console.log(`📡 Watchtower: ${roomId}`);
     socket.join(roomId);
   });
 
-  // 3. RECEPTION DES VOTES (Depuis l'extension)
+  // 3. Votes (Watchtower)
   socket.on("nouveau_vote", (payload) => {
-    // payload = { room: "DEMO_CLIENT", vote: "A" } ou "Je vote A"
     const room = payload.room;
     let rawVote = String(payload.vote || "").trim().toUpperCase();
-    
-    // Nettoyage basique (A, B, C, D)
     let choice = null;
     if (rawVote.startsWith("A") || rawVote.includes(" A ")) choice = "A";
     else if (rawVote.startsWith("B") || rawVote.includes(" B ")) choice = "B";
@@ -145,32 +139,18 @@ io.on("connection", (socket) => {
       const r = getRoom(room);
       r.votes[choice]++;
       r.votes.total++;
-      
-      console.log(`🗳️ VOTE REÇU [${room}]: ${choice} (Total: ${r.votes.total})`);
-
-      // Calcul des %
-      const percents = calculatePercents(r.votes);
-      
-      // Mise à jour de l'overlay
-      const overlayName = "quiz_ou_sondage"; // Nom par défaut
-      const s = ensureOverlayState(room, overlayName);
-      s.data.percents = percents;
-      
-      // On diffuse à tout le monde (Overlay + Remote)
-      io.to(room).emit("overlay:state", { 
-        overlay: overlayName, 
-        state: s.state, // On garde l'état actuel (ex: "open")
-        data: s.data 
-      });
+      console.log(`🗳️ VOTE: ${choice} (Total: ${r.votes.total})`);
+      const s = ensureOverlayState(room, "quiz_ou_sondage");
+      s.data.percents = calculatePercents(r.votes);
+      io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: s.state, data: s.data });
     }
   });
 
-  // 4. COMMANDES REMOTE (Chargement, Reset...)
+  // 4. Remote Controls
   socket.on("control:load_question", async (p) => {
-    // Reset des votes au chargement d'une nouvelle question
     const r = getRoom(p.room);
-    r.votes = { A:0, B:0, C:0, D:0, total:0 }; 
-
+    r.votes = { A:0, B:0, C:0, D:0, total:0 }; // Reset votes
+    
     const { data: q } = await supabase.from("questions").select("*").eq("room_id", p.room).eq("question_key", p.question_key).maybeSingle();
     if (!q) return;
     const question = {
@@ -180,23 +160,20 @@ io.on("connection", (socket) => {
     };
     const s = ensureOverlayState(p.room, p.overlay); 
     s.state = "question"; 
-    s.data = { question, percents: {A:0, B:0, C:0, D:0} }; // Reset visuel
+    s.data = { question, percents: {A:0, B:0, C:0, D:0} };
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "question", data: s.data });
   });
 
   socket.on("control:show_options", (p) => io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: ensureOverlayState(p.room, p.overlay).data }));
-  
   socket.on("control:set_state", (p) => {
     const s = ensureOverlayState(p.room, p.overlay); s.state = p.state;
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: s.data });
   });
-  
   socket.on("control:idle", (p) => io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} }));
 });
 
-// Helper %
 function calculatePercents(votes) {
-  const t = votes.total || 1; // Eviter division par 0
+  const t = votes.total || 1;
   return {
     A: ((votes.A / t) * 100).toFixed(1),
     B: ((votes.B / t) * 100).toFixed(1),
@@ -206,4 +183,4 @@ function calculatePercents(votes) {
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server V5.2 (Watchtower) on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server V5.3 (Fixed) on ${PORT}`));
