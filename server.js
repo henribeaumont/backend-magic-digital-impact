@@ -1,8 +1,9 @@
 // ==========================================
-// MDI SERVER V3.4 (SAFE + KEY + SUPABASE ON + MULTI-OVERLAY READY)
-// - NO REGRESSION: legacy OK (rejoindre_salle / nouveau_vote / commande_quiz)
-// - SaaS mode: overlay:join + control:* avec roomKey obligatoire
-// - Supabase: clients + questions
+// MDI SERVER V3.5 (STREAM DECK READY + HTTP API)
+// - NO REGRESSION: legacy OK
+// - SaaS mode: WebSocket overlay:join sécurisé
+// - API HTTP: Pour pilotage Stream Deck (Web Request) sans navigateur
+// - Supabase: Intégration active
 // ==========================================
 
 const express = require("express");
@@ -19,6 +20,9 @@ try {
 }
 
 const app = express();
+
+// IMPORTANT: Permet de lire le JSON envoyé par Stream Deck (POST)
+app.use(express.json()); 
 app.use(cors());
 
 const server = http.createServer(app);
@@ -51,7 +55,6 @@ const FALLBACK_CLIENTS_CONFIG = {
   DEMO_CLIENT: {
     active: true,
     room_key: "demo_key_123",
-    // entitlements optionnels. si absent => autorise tout (MVP)
     entitlements: {
       quiz_ou_sondage: true,
       wordcloud: true,
@@ -66,8 +69,6 @@ const FALLBACK_CLIENTS_CONFIG = {
 // Helpers Supabase
 // --------------------
 async function sbGetClient(roomId) {
-  // Table attendue: clients
-  // Colonnes attendues: room_id (text), room_key (text), active (bool), entitlements (jsonb optionnel)
   const { data, error } = await supabase
     .from("clients")
     .select("room_id, room_key, active, entitlements")
@@ -92,10 +93,6 @@ async function sbCountClients() {
 }
 
 async function sbGetQuestion(roomId, questionKey) {
-  // Table attendue: questions
-  // Colonnes attendues:
-  // room_id (text), question_key (text), type (poll|quiz), prompt (text)
-  // option_a/b/c/d (text), correct_option (text nullable), enabled (bool), order_index (int), created_at
   const { data, error } = await supabase
     .from("questions")
     .select(
@@ -114,25 +111,20 @@ async function sbGetQuestion(roomId, questionKey) {
 }
 
 // --------------------
-// Auth / Entitlements
+// Auth / Entitlements logic
 // --------------------
 async function getClientConfig(roomId) {
   if (!roomId) return null;
-
   if (supabaseEnabled) {
     const c = await sbGetClient(roomId);
     return c;
   }
-
-  // fallback
   const fb = FALLBACK_CLIENTS_CONFIG[roomId];
   if (!fb) return null;
   return { room_id: roomId, ...fb };
 }
 
 function isActiveClient(client) {
-  // active nullable = si NULL => on considère true (pratique en MVP)
-  // Si tu veux strict: change en (client.active === true)
   if (!client) return false;
   if (client.active === null || typeof client.active === "undefined") return true;
   return client.active === true;
@@ -145,15 +137,10 @@ function isValidRoomKey(client, key) {
 }
 
 function hasEntitlement(client, overlayName) {
-  // MVP: si pas d’entitlements => autorise tout
   if (!client) return false;
   if (!overlayName) return false;
-
   const ent = client.entitlements;
-  if (!ent) return true;
-
-  // entitlements attendu en jsonb:
-  // { quiz_ou_sondage: true, confetti: true, ... }
+  if (!ent) return true; // Si pas de restrictions définies, tout est permis (MVP)
   return ent?.[overlayName] === true;
 }
 
@@ -166,7 +153,7 @@ function getRoom(roomId) {
   if (!ROOMS[roomId]) {
     ROOMS[roomId] = {
       meta: { roomId, createdAt: Date.now() },
-      overlays: {}, // overlayName -> { state, data, updatedAt }
+      overlays: {}, 
     };
     console.log(`🆕 [ROOM] Créée: ${roomId}`);
   }
@@ -181,34 +168,24 @@ function ensureOverlayState(roomId, overlay) {
   return room.overlays[overlay];
 }
 
-// --------------------
-// HTTP routes (debug)
-// --------------------
+// ==========================================
+// ROUTES HTTP (Browser + STREAM DECK API)
+// ==========================================
+
 app.get("/", (req, res) => {
-  res.send("MDI Live Server V3.4 (Safe Key + Legacy Compatible + Supabase)");
+  res.send("MDI Live Server V3.5 (HTTP API + Stream Deck Ready)");
 });
 
 app.get("/health", async (req, res) => {
   let clientsLoaded = null;
   if (supabaseEnabled) clientsLoaded = await sbCountClients();
-
-  res.json({
-    ok: true,
-    version: "3.4",
-    supabaseEnabled,
-    clientsLoaded,
-  });
+  res.json({ ok: true, version: "3.5", supabaseEnabled, clientsLoaded });
 });
 
-// Debug: liste quelques questions d’une room
-// Exemple: /debug/questions?room=DEMO_CLIENT
 app.get("/debug/questions", async (req, res) => {
   const room = String(req.query.room || "").trim();
   if (!room) return res.status(400).json({ ok: false, error: "missing_room" });
-
-  if (!supabaseEnabled) {
-    return res.status(400).json({ ok: false, error: "supabase_off" });
-  }
+  if (!supabaseEnabled) return res.status(400).json({ ok: false, error: "supabase_off" });
 
   const { data, error } = await supabase
     .from("questions")
@@ -217,286 +194,219 @@ app.get("/debug/questions", async (req, res) => {
     .order("order_index", { ascending: true })
     .limit(50);
 
-  if (error) return res.status(500).json({ ok: false, error: error.message || String(error) });
+  if (error) return res.status(500).json({ ok: false, error: error.message });
   return res.json({ ok: true, room, count: data?.length || 0, data });
 });
 
-// --------------------
-// Socket.io
-// --------------------
-io.on("connection", (socket) => {
-  console.log("🔌 Nouvelle connexion:", socket.id);
+// --------------------------------------------------------
+// [NOUVEAU] API ENDPOINT POUR STREAM DECK (Web Request)
+// Méthode: POST
+// URL: https://ton-url-render/api/trigger
+// Body JSON: { "room": "...", "key": "...", "overlay": "...", "action": "...", "payload": {...} }
+// --------------------------------------------------------
+app.post("/api/trigger", async (req, res) => {
+  const { room, key, overlay, action, payload } = req.body;
 
-  // --------------------------------------------------
-  // 1) LEGACY : rejoindre_salle (NE CASSE RIEN)
-  // --------------------------------------------------
+  // 1. Validation de base
+  if (!room || !key || !overlay || !action) {
+    return res.status(400).json({ ok: false, error: "missing_params" });
+  }
+
+  // 2. Auth via Supabase
+  const client = await getClientConfig(room);
+  
+  if (!isActiveClient(client)) {
+    return res.status(403).json({ ok: false, error: "client_inactive" });
+  }
+  if (!isValidRoomKey(client, key)) {
+    return res.status(403).json({ ok: false, error: "invalid_key" });
+  }
+  if (!hasEntitlement(client, overlay)) {
+    return res.status(403).json({ ok: false, error: "no_entitlement" });
+  }
+
+  // 3. Exécution de l'action (Mapping vers Socket logic)
+  try {
+    const overlayState = ensureOverlayState(room, overlay);
+
+    if (action === "set_state") {
+      // payload attendu: { state: "...", data: {...} }
+      if (!payload?.state) return res.status(400).json({ ok: false, error: "missing_state" });
+      
+      overlayState.state = payload.state;
+      if (payload.data) overlayState.data = payload.data;
+      overlayState.updatedAt = Date.now();
+      
+      io.to(room).emit("overlay:state", { overlay, state: overlayState.state, data: overlayState.data });
+      console.log(`📱 [API] set_state: ${room}/${overlay} -> ${payload.state}`);
+    
+    } else if (action === "load_question") {
+      // payload attendu: { question_key: "..." }
+      const qKey = payload?.question_key;
+      if (!qKey) return res.status(400).json({ ok: false, error: "missing_question_key" });
+
+      if (supabaseEnabled) {
+        const q = await sbGetQuestion(room, qKey);
+        if (q && q.enabled !== false) {
+          const question = {
+            id: q.question_key,
+            type: q.type,
+            prompt: q.prompt,
+            options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
+            correct: q.type === "quiz" ? (q.correct_option || null) : null,
+          };
+          overlayState.state = "question";
+          overlayState.data = { question };
+          io.to(room).emit("overlay:state", { overlay, state: "question", data: { question } });
+          console.log(`📱 [API] load_question: ${room} -> ${qKey}`);
+        } else {
+           return res.status(404).json({ ok: false, error: "question_not_found" });
+        }
+      } else {
+        return res.status(503).json({ ok: false, error: "supabase_off" });
+      }
+
+    } else if (action === "show_options") {
+       if (overlayState.data?.question) {
+         overlayState.state = "options";
+         io.to(room).emit("overlay:state", { overlay, state: "options", data: overlayState.data });
+         console.log(`📱 [API] show_options: ${room}`);
+       }
+
+    } else if (action === "idle") {
+      overlayState.state = "idle";
+      overlayState.data = {};
+      io.to(room).emit("overlay:state", { overlay, state: "idle", data: {} });
+      console.log(`📱 [API] idle: ${room}`);
+    }
+
+    // Réponse succès au Stream Deck
+    return res.json({ ok: true, action });
+
+  } catch (err) {
+    console.error("API Error", err);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// ==========================================
+// SOCKET.IO (Navigateurs & Overlays)
+// ==========================================
+io.on("connection", (socket) => {
+  console.log("🔌 Nouvelle connexion Socket:", socket.id);
+
+  // 1) LEGACY
   socket.on("rejoindre_salle", async (roomID) => {
     const room = String(roomID || "").trim();
     if (!room) return;
-
     const client = await getClientConfig(room);
-
     if (isActiveClient(client)) {
       socket.join(room);
-      console.log(`✅ [LEGACY] Accès VALIDÉ pour : ${room}`);
       socket.emit("statut_connexion", "OK");
     } else {
-      console.log(`⛔ [LEGACY] Accès REFUSÉ pour : ${room}`);
       socket.emit("statut_connexion", "REFUSE");
     }
   });
 
-  // --------------------------------------------------
-  // 2) SAAS : overlay:join (AVEC KEY)
-  // payload: { room, key, overlay }
-  // --------------------------------------------------
-  socket.on("overlay:join", async (payload) => {
-    const room = String(payload?.room || "").trim();
-    const key = String(payload?.key || "").trim();
-    const overlay = String(payload?.overlay || "").trim();
+  socket.on("nouveau_vote", async (data) => {
+    if (typeof data !== "object" || !data.room || !data.vote) return;
+    const room = String(data.room).trim();
+    const client = await getClientConfig(room);
+    if (isActiveClient(client)) {
+      io.to(room).emit("mise_a_jour_overlay", String(data.vote).trim());
+    }
+  });
 
+  socket.on("commande_quiz", async (data) => {
+    if (!data || !data.room) return;
+    const room = String(data.room).trim();
+    const client = await getClientConfig(room);
+    if (isActiveClient(client)) {
+      io.to(room).emit("ordre_quiz", String(data.action || "").trim());
+    }
+  });
+
+  // 2) SAAS MODE (Secure)
+  socket.on("overlay:join", async (payload) => {
+    const { room, key, overlay } = payload || {};
     if (!room || !overlay) return;
 
     const client = await getClientConfig(room);
-
-    // abonnement
+    
     if (!isActiveClient(client)) {
-      console.log(`⛔ [SAAS] overlay:join refusé (inactive): room=${room} overlay=${overlay}`);
       socket.emit("overlay:forbidden", { reason: "inactive_subscription" });
       return;
     }
-
-    // clé
     if (!isValidRoomKey(client, key)) {
-      console.log(`⛔ [SAAS] overlay:join refusé (bad_key): room=${room} overlay=${overlay}`);
       socket.emit("overlay:forbidden", { reason: "invalid_key" });
       return;
     }
-
-    // droits overlay
     if (!hasEntitlement(client, overlay)) {
-      console.log(`⛔ [SAAS] overlay:join refusé (no_entitlement): room=${room} overlay=${overlay}`);
       socket.emit("overlay:forbidden", { reason: "no_entitlement", overlay });
       return;
     }
 
     socket.join(room);
-    console.log(`✅ [SAAS] join OK: room=${room} overlay=${overlay}`);
-
     const state = ensureOverlayState(room, overlay);
     socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
   });
 
-  // --------------------------------------------------
-  // 3) SAAS : overlay:get_state (AVEC KEY)
-  // payload: { room, key, overlay }
-  // --------------------------------------------------
   socket.on("overlay:get_state", async (payload) => {
-    const room = String(payload?.room || "").trim();
-    const key = String(payload?.key || "").trim();
-    const overlay = String(payload?.overlay || "").trim();
-
+    const { room, key, overlay } = payload || {};
     if (!room || !overlay) return;
-
     const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-    if (!isValidRoomKey(client, key)) return;
-    if (!hasEntitlement(client, overlay)) return;
-
-    const state = ensureOverlayState(room, overlay);
-    socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
+    if (isActiveClient(client) && isValidRoomKey(client, key) && hasEntitlement(client, overlay)) {
+      const state = ensureOverlayState(room, overlay);
+      socket.emit("overlay:state", { overlay, state: state.state, data: state.data });
+    }
   });
 
-  // --------------------------------------------------
-  // 4) LEGACY : votes (extension Chrome)
-  // --------------------------------------------------
-  socket.on("nouveau_vote", async (data) => {
-    if (typeof data !== "object" || !data.room || !data.vote) return;
-
-    const room = String(data.room).trim();
-    const vote = String(data.vote).trim();
-    if (!room || !vote) return;
-
-    const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-
-    io.to(room).emit("mise_a_jour_overlay", vote);
-    console.log(`[Salle ${room}] Vote : ${vote}`);
-  });
-
-  // --------------------------------------------------
-  // 5) LEGACY : télécommande quiz (NE CASSE RIEN)
-  // --------------------------------------------------
-  socket.on("commande_quiz", async (data) => {
-    if (!data || !data.room) return;
-
-    const room = String(data.room).trim();
-    const action = String(data.action || "").trim();
-
-    const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-
-    console.log(`📱 [LEGACY] Télécommande [${room}] : ${action}`);
-    io.to(room).emit("ordre_quiz", action);
-  });
-
-  // --------------------------------------------------
-  // 6) SAAS : control:set_state (AVEC KEY)
-  // payload: { room, key, overlay, state, data }
-  // --------------------------------------------------
+  // Pilotage via WebSocket (Télécommande Web)
   socket.on("control:set_state", async (payload) => {
-    const room = String(payload?.room || "").trim();
-    const key = String(payload?.key || "").trim();
-    const overlay = String(payload?.overlay || "").trim();
-    const state = String(payload?.state || "").trim();
-    const data = payload?.data;
-
+    const { room, key, overlay, state, data } = payload || {};
     if (!room || !overlay || !state) return;
 
     const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-    if (!isValidRoomKey(client, key)) return;
-    if (!hasEntitlement(client, overlay)) return;
+    if (!isActiveClient(client) || !isValidRoomKey(client, key) || !hasEntitlement(client, overlay)) return;
 
     const overlayState = ensureOverlayState(room, overlay);
     overlayState.state = state;
     if (data && typeof data === "object") overlayState.data = data;
     overlayState.updatedAt = Date.now();
 
-    console.log(`🎮 [SAAS] State: room=${room} overlay=${overlay} -> ${state}`);
-    io.to(room).emit("overlay:state", {
-      overlay,
-      state: overlayState.state,
-      data: overlayState.data,
-    });
+    io.to(room).emit("overlay:state", { overlay, state: overlayState.state, data: overlayState.data });
   });
 
-  // --------------------------------------------------
-  // 7) SAAS : control:load_question (AVEC KEY)
-  // payload: { room, key, overlay:"quiz_ou_sondage", question_key }
-  // - charge la question depuis Supabase
-  // - envoie overlay:state {state:"question"} (question seule)
-  // --------------------------------------------------
   socket.on("control:load_question", async (payload) => {
-    const room = String(payload?.room || "").trim();
-    const key = String(payload?.key || "").trim();
-    const overlay = String(payload?.overlay || "").trim();
-    const questionKey = String(payload?.question_key || "").trim();
-
-    if (!room || !overlay || !questionKey) return;
+    // Identique logique que API mais via Socket
+    const { room, key, overlay, question_key } = payload || {};
+    if (!room || !overlay || !question_key) return;
 
     const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-    if (!isValidRoomKey(client, key)) return;
-    if (!hasEntitlement(client, overlay)) return;
+    if (!isActiveClient(client) || !isValidRoomKey(client, key) || !hasEntitlement(client, overlay)) return;
+    if (!supabaseEnabled) return;
 
-    if (!supabaseEnabled) {
-      console.warn("⛔ [SAAS] control:load_question impossible: supabase_off");
-      return;
-    }
+    const q = await sbGetQuestion(room, question_key);
+    if (!q || q.enabled === false) return; // ou envoyer erreur
 
-    const q = await sbGetQuestion(room, questionKey);
-    if (!q || q.enabled === false) {
-      console.warn(`⛔ [SAAS] Question introuvable ou disabled: room=${room} key=${questionKey}`);
-      // On met idle plutôt que laisser un état “bizarre”
-      const overlayState = ensureOverlayState(room, overlay);
-      overlayState.state = "idle";
-      overlayState.data = {};
-      io.to(room).emit("overlay:state", { overlay, state: "idle", data: {} });
-      return;
-    }
-
-    // Normalisation vers un JSON stable pour l'overlay
     const question = {
       id: q.question_key,
-      type: q.type, // "poll" | "quiz"
+      type: q.type,
       prompt: q.prompt,
-      options: {
-        A: q.option_a || "",
-        B: q.option_b || "",
-        C: q.option_c || "",
-        D: q.option_d || "",
-      },
-      // quiz: "A"|"B"|"C"|"D" / poll: null
+      options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
       correct: q.type === "quiz" ? (q.correct_option || null) : null,
     };
 
     const overlayState = ensureOverlayState(room, overlay);
     overlayState.state = "question";
     overlayState.data = { question };
-    overlayState.updatedAt = Date.now();
-
-    console.log(`✅ [SAAS] Question chargée: room=${room} overlay=${overlay} q=${questionKey}`);
-    io.to(room).emit("overlay:state", {
-      overlay,
-      state: overlayState.state,
-      data: overlayState.data,
-    });
-  });
-
-  // --------------------------------------------------
-  // 8) SAAS : control:show_options (AVEC KEY)
-  // payload: { room, key, overlay:"quiz_ou_sondage" }
-  // - passe l'overlay en state "options" (question + options visibles)
-  // - le délai d’apparition 1 par 1 sera géré côté overlay (CSS OBS)
-  // --------------------------------------------------
-  socket.on("control:show_options", async (payload) => {
-    const room = String(payload?.room || "").trim();
-    const key = String(payload?.key || "").trim();
-    const overlay = String(payload?.overlay || "").trim();
-
-    if (!room || !overlay) return;
-
-    const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-    if (!isValidRoomKey(client, key)) return;
-    if (!hasEntitlement(client, overlay)) return;
-
-    const overlayState = ensureOverlayState(room, overlay);
-
-    // Si aucune question n’est chargée, on refuse de passer en options
-    if (!overlayState.data?.question) {
-      console.warn(`⛔ [SAAS] show_options ignoré: aucune question chargée (room=${room})`);
-      return;
-    }
-
-    overlayState.state = "options";
-    overlayState.updatedAt = Date.now();
-
-    io.to(room).emit("overlay:state", {
-      overlay,
-      state: overlayState.state,
-      data: overlayState.data,
-    });
-  });
-
-  // --------------------------------------------------
-  // 9) SAAS : control:idle (AVEC KEY)
-  // payload: { room, key, overlay }
-  // - vide total (overlay transparent)
-  // --------------------------------------------------
-  socket.on("control:idle", async (payload) => {
-    const room = String(payload?.room || "").trim();
-    const key = String(payload?.key || "").trim();
-    const overlay = String(payload?.overlay || "").trim();
-    if (!room || !overlay) return;
-
-    const client = await getClientConfig(room);
-    if (!isActiveClient(client)) return;
-    if (!isValidRoomKey(client, key)) return;
-    if (!hasEntitlement(client, overlay)) return;
-
-    const overlayState = ensureOverlayState(room, overlay);
-    overlayState.state = "idle";
-    overlayState.data = {};
-    overlayState.updatedAt = Date.now();
-
-    io.to(room).emit("overlay:state", { overlay, state: "idle", data: {} });
+    
+    io.to(room).emit("overlay:state", { overlay, state: "question", data: { question } });
   });
 });
 
 // --------------------
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🚀 MDI Server V3.4 écoute sur le port ${PORT}`);
+  console.log(`🚀 Server V3.5 (API+Socket) listening on ${PORT}`);
 });
