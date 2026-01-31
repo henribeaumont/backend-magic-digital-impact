@@ -1,5 +1,6 @@
 // ============================================================
-// MDI SERVER V5.5 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
+// MDI SERVER V5.6 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
+// Patch: parsing vote A/B/C/D robuste (regex), sans casser raw_vote
 // ============================================================
 const express = require("express");
 const http = require("http");
@@ -22,7 +23,6 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 // --- CONFIGURATION ---
-// Priorité à la variable Render, sinon fallback sur la clé par défaut
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "MDI_SUPER_ADMIN_2026";
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -50,7 +50,7 @@ function ensureOverlayState(roomId, overlay) {
 function getVoteStats(roomHistory) {
   const stats = { A:0, B:0, C:0, D:0, total:0 };
   roomHistory.forEach(v => {
-    if(stats[v.choice] !== undefined) stats[v.choice]++;
+    if (stats[v.choice] !== undefined) stats[v.choice]++;
     stats.total++;
   });
   return stats;
@@ -66,8 +66,38 @@ function calculatePercents(stats) {
   };
 }
 
-// --- MIDDLEWARES D'AUTH ---
+/* ============================================================
+   ✅ PATCH IMPORTANT : extraction de choix A/B/C/D robuste
+   - supporte : "A", "a", "A)", "A.", "Henri : A", "Réponse A"
+   - évite les faux positifs dans des mots (ex: "CAB" ne doit pas matcher B)
+============================================================ */
+function normalizeVoteText(raw) {
+  if (!raw) return "";
+  // Normalise espaces (inclut NBSP) + trims
+  return String(raw)
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+}
 
+function extractChoiceABCD(voteText) {
+  const s = normalizeVoteText(voteText);
+  if (!s) return null;
+
+  // 1) Si c'est exactement A/B/C/D (ou avec ponctuation)
+  const exact = s.match(/^([ABCD])[\)\]\.\!\?:,\-]*$/);
+  if (exact) return exact[1];
+
+  // 2) Token isolé (bordures non alphanum)
+  // ex: "HENRI : A", "REPONSE B", "(C)", "=> D"
+  const token = s.match(/(^|[^A-Z0-9])([ABCD])([^A-Z0-9]|$)/);
+  if (token) return token[2];
+
+  return null;
+}
+
+// --- MIDDLEWARES D'AUTH ---
 function requireAdmin(req, res, next) {
   const incomingSecret = req.headers["x-admin-secret"];
   if (incomingSecret !== ADMIN_SECRET) {
@@ -89,8 +119,7 @@ async function requireClientAuth(req, res, next) {
 }
 
 // --- ROUTES API ---
-
-app.get("/", (req, res) => res.send("MDI Server V5.5 Pro Online"));
+app.get("/", (req, res) => res.send("MDI Server V5.6 Pro Online"));
 
 app.get("/debug/questions", async (req, res) => {
   const room = String(req.query.room || "").trim();
@@ -146,19 +175,19 @@ app.post("/api/client/delete-question", requireClientAuth, async (req, res) => {
 });
 
 // --- GESTION DES SOCKETS ---
-
 io.on("connection", (socket) => {
   socket.on("rejoindre_salle", (roomId) => socket.join(roomId));
 
   socket.on("overlay:join", async (p) => {
-    if(!supabaseEnabled) return;
+    if (!supabaseEnabled) return;
     const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
     if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", {reason:"auth"});
     socket.join(p.room);
+
     const s = ensureOverlayState(p.room, p.overlay);
     if (p.overlay === "quiz_ou_sondage") {
-        const r = getRoom(p.room);
-        if (r.history.length > 0) s.data.percents = calculatePercents(getVoteStats(r.history));
+      const r = getRoom(p.room);
+      if (r.history.length > 0) s.data.percents = calculatePercents(getVoteStats(r.history));
     }
     socket.emit("overlay:state", { overlay: p.overlay, state: s.state, data: s.data });
   });
@@ -166,25 +195,34 @@ io.on("connection", (socket) => {
   socket.on("nouveau_vote", (payload) => {
     const room = payload.room;
     const user = payload.user || "Anonyme";
-    const rawVote = String(payload.vote || "").trim().toUpperCase();
+    const rawVoteOriginal = String(payload.vote || "");
+    const rawVote = normalizeVoteText(rawVoteOriginal);
 
     if (room && rawVote) {
       const r = getRoom(room);
-      let choice = null;
-      if (rawVote.startsWith("A") || rawVote.includes(" A ")) choice = "A";
-      else if (rawVote.startsWith("B") || rawVote.includes(" B ")) choice = "B";
-      else if (rawVote.startsWith("C") || rawVote.includes(" C ")) choice = "C";
-      else if (rawVote.startsWith("D") || rawVote.includes(" D ")) choice = "D";
+
+      // ✅ nouveau parsing robuste
+      const choice = extractChoiceABCD(rawVote);
 
       if (choice) {
         const alreadyVoted = r.history.find(v => v.user === user && user !== "Anonyme");
         if (!alreadyVoted) {
           r.history.push({ user, choice, time: Date.now() });
+
           const s = ensureOverlayState(room, "quiz_ou_sondage");
+          // Important : on conserve l'état courant (question/options/results)
+          // et on ne met à jour que les data.percents.
           s.data.percents = calculatePercents(getVoteStats(r.history));
-          io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: s.state, data: s.data });
+
+          io.to(room).emit("overlay:state", {
+            overlay: "quiz_ou_sondage",
+            state: s.state,
+            data: s.data
+          });
         }
       }
+
+      // Canal universel : toujours émis (utile pour word_cloud / emoji_tornado / etc.)
       io.to(room).emit("raw_vote", { user, vote: rawVote });
     }
   });
@@ -192,17 +230,21 @@ io.on("connection", (socket) => {
   socket.on("control:set_state", (p) => {
     const s = ensureOverlayState(p.room, p.overlay);
     s.state = p.state;
+
     if (p.state === "winner" && p.overlay === "quiz_ou_sondage") {
       const q = s.data.question;
       const r = getRoom(p.room);
       let winnerText = "Personne";
+
       if (q && q.type === "quiz" && q.correct) {
         const winners = r.history.filter(v => v.choice === q.correct);
         if (winners.length > 0) {
           winners.sort((a,b) => a.time - b.time);
           winnerText = winners[0].user === "Anonyme" ? "Quelqu'un (Anonyme)" : winners[0].user;
-        } else { winnerText = "Aucune bonne réponse"; }
-      } 
+        } else {
+          winnerText = "Aucune bonne réponse";
+        }
+      }
       else if (q && q.type === "poll") {
         const stats = getVoteStats(r.history);
         const max = Math.max(stats.A, stats.B, stats.C, stats.D);
@@ -211,35 +253,50 @@ io.on("connection", (socket) => {
       }
       s.data.winnerName = winnerText;
     }
+
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: s.data });
   });
 
   socket.on("control:load_question", async (p) => {
     const r = getRoom(p.room);
     r.history = [];
-    const { data: q } = await supabase.from("questions").select("*").eq("room_id", p.room).eq("question_key", p.question_key).maybeSingle();
+
+    const { data: q } = await supabase
+      .from("questions")
+      .select("*")
+      .eq("room_id", p.room)
+      .eq("question_key", p.question_key)
+      .maybeSingle();
+
     if (!q) return;
+
     const question = {
-      id: q.question_key, type: q.type, prompt: q.prompt,
+      id: q.question_key,
+      type: q.type,
+      prompt: q.prompt,
       options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
       correct: q.type === "quiz" ? q.correct_option : null,
     };
-    const s = ensureOverlayState(p.room, p.overlay); 
-    s.state = "question"; 
+
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "question";
     s.data = { question, percents: {A:0, B:0, C:0, D:0} };
+
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "question", data: s.data });
   });
 
   socket.on("control:show_options", (p) => {
-    const s = ensureOverlayState(p.room, p.overlay); s.state = "options";
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "options";
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: s.data });
   });
-  
+
   socket.on("control:idle", (p) => {
-    const s = ensureOverlayState(p.room, p.overlay); s.state = "idle";
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "idle";
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
   });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.5 Pro Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.6 Pro Online on ${PORT}`));
