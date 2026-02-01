@@ -101,7 +101,7 @@ function extractChoiceABCD(voteText) {
 function requireAdmin(req, res, next) {
   const incomingSecret = req.headers["x-admin-secret"];
   if (incomingSecret !== ADMIN_SECRET) {
-    console.warn(`[AUTH] Admin Refusé. Reçu: ${incomingSecret}`);
+    console.warn([AUTH] Admin Refusé. Reçu: ${incomingSecret});
     return res.status(403).json({ ok: false, error: "Bad Secret" });
   }
   next();
@@ -299,4 +299,4 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.6 Pro Online on ${PORT}`));
+server.listen(PORT, () => console.log(🚀 Server MDI V5.6 Pro Online on ${PORT}));
