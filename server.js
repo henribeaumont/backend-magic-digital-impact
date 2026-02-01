@@ -1,6 +1,8 @@
 // ============================================================
-// MDI SERVER V5.6 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
-// Patch: parsing vote A/B/C/D robuste (regex), sans casser raw_vote
+// MDI SERVER V5.7 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
+// ✅ NOUVEAU : Système d'état unifié pour nuage_de_mots et roue_loto
+// ✅ CONSERVÉ : Tous les overlays existants (quiz, tug_of_war, emoji_tornado)
+// ✅ ZÉRO RÉGRESSION : raw_vote toujours émis pour compatibilité
 // ============================================================
 const express = require("express");
 const http = require("http");
@@ -119,7 +121,7 @@ async function requireClientAuth(req, res, next) {
 }
 
 // --- ROUTES API ---
-app.get("/", (req, res) => res.send("MDI Server V5.6 Pro Online"));
+app.get("/", (req, res) => res.send("MDI Server V5.7 Pro Online"));
 
 app.get("/debug/questions", async (req, res) => {
   const room = String(req.query.room || "").trim();
@@ -192,6 +194,55 @@ io.on("connection", (socket) => {
     socket.emit("overlay:state", { overlay: p.overlay, state: s.state, data: s.data });
   });
 
+  /* ============================================================
+     ✅ NOUVEAU : Activation/désactivation des overlays
+     - Utilisé par nuage_de_mots et roue_loto
+     - Reset les données au moment de l'activation
+  ============================================================ */
+  socket.on("control:activate_overlay", (payload) => {
+    const { room, overlay } = payload;
+    const s = ensureOverlayState(room, overlay);
+    
+    s.state = "active";
+    s.data.activatedAt = Date.now(); // Timestamp serveur
+    
+    // ✅ Reset des données spécifiques selon l'overlay
+    if (overlay === "nuage_de_mots") {
+      s.data.words = {}; // Vide le nuage
+    }
+    if (overlay === "roue_loto") {
+      s.data.participants = []; // Vide la roue
+    }
+    
+    console.log(`✅ [${room}] Overlay "${overlay}" activé`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay,
+      state: "active",
+      data: s.data
+    });
+  });
+
+  socket.on("control:deactivate_overlay", (payload) => {
+    const { room, overlay } = payload;
+    const s = ensureOverlayState(room, overlay);
+    s.state = "idle";
+    
+    console.log(`🔴 [${room}] Overlay "${overlay}" désactivé`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay,
+      state: "idle",
+      data: {}
+    });
+  });
+
+  /* ============================================================
+     ✅ MODIFIÉ : nouveau_vote dispatch vers overlays actifs
+     - Conserve le comportement existant pour quiz
+     - Ajoute dispatch conditionnel pour nuage_de_mots et roue_loto
+     - ✅ CONSERVE l'émission raw_vote (compatibilité totale)
+  ============================================================ */
   socket.on("nouveau_vote", (payload) => {
     const room = payload.room;
     const user = payload.user || "Anonyme";
@@ -201,17 +252,14 @@ io.on("connection", (socket) => {
     if (room && rawVote) {
       const r = getRoom(room);
 
-      // ✅ nouveau parsing robuste
+      // ✅ CONSERVÉ : logique quiz existante (pas de changement)
       const choice = extractChoiceABCD(rawVote);
-
       if (choice) {
         const alreadyVoted = r.history.find(v => v.user === user && user !== "Anonyme");
         if (!alreadyVoted) {
           r.history.push({ user, choice, time: Date.now() });
 
           const s = ensureOverlayState(room, "quiz_ou_sondage");
-          // Important : on conserve l'état courant (question/options/results)
-          // et on ne met à jour que les data.percents.
           s.data.percents = calculatePercents(getVoteStats(r.history));
 
           io.to(room).emit("overlay:state", {
@@ -222,11 +270,63 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Canal universel : toujours émis (utile pour word_cloud / emoji_tornado / etc.)
+      // ✅ NOUVEAU : dispatch vers overlays actifs (nuage_de_mots, roue_loto)
+      Object.keys(r.overlays).forEach(overlayName => {
+        const overlay = r.overlays[overlayName];
+        
+        // ❌ Ignore si l'overlay n'est pas en état "active"
+        if (overlay.state !== "active") return;
+        
+        // ✅ Traitement nuage de mots
+        if (overlayName === "nuage_de_mots") {
+          if (!overlay.data.words) overlay.data.words = {};
+          
+          // Nettoyer et valider le mot
+          const word = rawVote.trim().toLowerCase();
+          
+          // Ignorer si c'est un vote quiz A/B/C/D
+          if (choice) return;
+          
+          // Ignorer les mots trop longs ou avec trop de mots
+          const words = word.split(/\s+/).filter(Boolean);
+          if (words.length > 6 || word.length > 60) return;
+          
+          // Ajouter ou incrémenter le mot
+          overlay.data.words[word] = (overlay.data.words[word] || 0) + 1;
+          
+          io.to(room).emit("overlay:state", {
+            overlay: overlayName,
+            state: "active",
+            data: overlay.data
+          });
+        }
+        
+        // ✅ Traitement roue loto
+        if (overlayName === "roue_loto") {
+          if (!overlay.data.participants) overlay.data.participants = [];
+          
+          // Ajouter le participant s'il n'existe pas déjà
+          if (user !== "Anonyme" && !overlay.data.participants.includes(user)) {
+            overlay.data.participants.push(user);
+            
+            io.to(room).emit("overlay:state", {
+              overlay: overlayName,
+              state: "active",
+              data: overlay.data
+            });
+          }
+        }
+      });
+
+      // ✅ CONSERVÉ : canal universel raw_vote (compatibilité totale)
+      // Utilisé par emoji_tornado, tug_of_war, et autres overlays existants
       io.to(room).emit("raw_vote", { user, vote: rawVote });
     }
   });
 
+  /* ============================================================
+     ✅ CONSERVÉ : Tous les events existants (pas de changement)
+  ============================================================ */
   socket.on("control:set_state", (p) => {
     const s = ensureOverlayState(p.room, p.overlay);
     s.state = p.state;
@@ -299,4 +399,4 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.6 Pro Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.7 Pro Online on ${PORT}`));
