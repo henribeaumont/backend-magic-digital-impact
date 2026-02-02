@@ -1,6 +1,7 @@
 // ============================================================
-// MDI SERVER V5.7 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
-// ✅ NOUVEAU : Système d'état unifié pour nuage_de_mots et roue_loto
+// MDI SERVER V5.8 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
+// ✅ NOUVEAU : Events roue loto (start_collect, stop_collect, spin, reset)
+// ✅ CONSERVÉ : Système d'état unifié pour nuage_de_mots et roue_loto
 // ✅ CONSERVÉ : Tous les overlays existants (quiz, tug_of_war, emoji_tornado)
 // ✅ ZÉRO RÉGRESSION : raw_vote toujours émis pour compatibilité
 // ============================================================
@@ -396,7 +397,62 @@ io.on("connection", (socket) => {
     s.state = "idle";
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
   });
+
+  /* ============================================================
+     ✅ NOUVEAUX EVENTS ROUE LOTO (V5.8)
+     - Pilotés depuis télécommande uniquement (plus de triggers chat)
+  ============================================================ */
+  socket.on("roue:start_collect", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.state = "collecting";
+    s.data.participants = []; // Reset participants
+    
+    console.log(`📝 [ROUE] ${p.room} - Démarrage collecte`);
+    
+    io.to(p.room).emit("roue:start_collect");
+  });
+
+  socket.on("roue:stop_collect", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "collecting") {
+      s.state = "ready";
+      console.log(`🔒 [ROUE] ${p.room} - Fermeture collecte`);
+      io.to(p.room).emit("roue:stop_collect");
+    }
+  });
+
+  socket.on("roue:spin", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "ready") {
+      s.state = "spinning";
+      console.log(`🎡 [ROUE] ${p.room} - SPIN`);
+      io.to(p.room).emit("roue:spin");
+    }
+  });
+
+  socket.on("roue:reset", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.state = "idle";
+    s.data.participants = [];
+    
+    console.log(`🔄 [ROUE] ${p.room} - Reset`);
+    
+    io.to(p.room).emit("roue:reset");
+  });
+
+  socket.on("roue:add_participant", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "collecting") {
+      if (!s.data.participants) s.data.participants = [];
+      
+      const name = String(p.name || "").trim();
+      if (name && !s.data.participants.includes(name)) {
+        s.data.participants.push(name);
+        io.to(p.room).emit("roue:participant_added", { name });
+      }
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.7 Pro Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.8 Pro Online on ${PORT}`));
