@@ -1,148 +1,148 @@
 // ============================================================
-// MDI SERVER V5.9 - PATCH TIMER/CHRONO
+// MDI SERVER V5.9 - COMPLET (TIMER/CHRONO INTÉGRÉ)
+// ✅ Support timer/chrono avec API Stream Deck
+// ✅ Health check endpoint (/health)
+// ✅ Tous les overlays existants préservés
+// ✅ ZÉRO RÉGRESSION
 // ============================================================
-// Ce fichier contient les modifications à apporter à server.js V5.8
-// pour supporter le nouvel overlay timer_chrono
-// ============================================================
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
+let createClient;
+try { ({ createClient } = require("@supabase/supabase-js")); } catch (e) { createClient = null; }
 
-/* ============================================================
-   ÉTAPE 1 : AJOUTER timer_chrono AUX OVERLAYS CONNUS
-   ============================================================
-   Trouver la section où les overlays sont listés et ajouter :
-*/
+const app = express();
+app.use(express.json());
 
-const KNOWN_OVERLAYS = [
-  "nuage_de_mots",
-  "roue_loto",
-  "quiz_ou_sondage",
-  "tug_of_war",
-  "emoji_tornado",
-  "decompte_poker",
-  "mot_magique",
-  "decompte_bonhomme",
-  "timer_chrono"  // ← NOUVEAU
-];
+// CONFIGURATION CORS RIGOUREUSE POUR SAAS
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "x-admin-secret", "x-room-id", "x-room-key"]
+}));
 
-/* ============================================================
-   ÉTAPE 2 : AJOUTER LES EVENT HANDLERS TIMER
-   ============================================================
-   Ajouter ces handlers dans la section io.on("connection")
-   APRÈS les handlers existants (roue, quiz, etc.)
-*/
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
-/* ===== TIMER/CHRONO HANDLERS ===== */
+// --- CONFIGURATION ---
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "MDI_SUPER_ADMIN_2026";
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
-// Changer le mode (timer/chrono)
-socket.on("control:timer_set_mode", (payload) => {
-  const { room, mode } = payload;
-  if (!room) return;
+const supabaseEnabled = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY) && typeof createClient === "function";
+const supabase = supabaseEnabled ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
+
+// --- MÉMOIRE VIVE (ROOMS) ---
+const ROOMS = Object.create(null);
+
+function getRoom(id) {
+  if (!ROOMS[id]) {
+    ROOMS[id] = { overlays: {}, history: [] };
+  }
+  return ROOMS[id];
+}
+
+function ensureOverlayState(roomId, overlay) {
+  const r = getRoom(roomId);
+  if (!r.overlays[overlay]) r.overlays[overlay] = { state: "idle", data: {} };
+  return r.overlays[overlay];
+}
+
+// --- LOGIQUE CALCULS QUIZ ---
+function getVoteStats(roomHistory) {
+  const stats = { A:0, B:0, C:0, D:0, total:0 };
+  roomHistory.forEach(v => {
+    if (stats[v.choice] !== undefined) stats[v.choice]++;
+    stats.total++;
+  });
+  return stats;
+}
+
+function calculatePercents(stats) {
+  const t = stats.total || 1;
+  return {
+    A: ((stats.A / t) * 100).toFixed(1),
+    B: ((stats.B / t) * 100).toFixed(1),
+    C: ((stats.C / t) * 100).toFixed(1),
+    D: ((stats.D / t) * 100).toFixed(1)
+  };
+}
+
+function normalizeVoteText(raw) {
+  if (!raw) return "";
+  return String(raw)
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
+function extractChoiceABCD(voteText) {
+  const s = normalizeVoteText(voteText);
+  if (!s) return null;
+
+  const exact = s.match(/^([ABCD])[\)\]\.\!\?:,\-]*$/);
+  if (exact) return exact[1];
+
+  const token = s.match(/(^|[^A-Z0-9])([ABCD])([^A-Z0-9]|$)/);
+  if (token) return token[2];
+
+  return null;
+}
+
+// --- MIDDLEWARES D'AUTH ---
+function requireAdmin(req, res, next) {
+  const incomingSecret = req.headers["x-admin-secret"];
+  if (incomingSecret !== ADMIN_SECRET) {
+    console.warn(`[AUTH] Admin Refusé. Reçu: ${incomingSecret}`);
+    return res.status(403).json({ ok: false, error: "Bad Secret" });
+  }
+  next();
+}
+
+async function requireClientAuth(req, res, next) {
+  if (!supabaseEnabled) return res.json({ ok: false, error: "no_db" });
+  const roomId = req.headers["x-room-id"];
+  const roomKey = req.headers["x-room-key"];
+  const { data: client } = await supabase.from("clients").select("*").eq("room_id", roomId).limit(1).maybeSingle();
+  if (!client) return res.status(404).json({ ok: false, error: "Client inconnu" });
+  if (client.room_key !== roomKey) return res.status(403).json({ ok: false, error: "Mauvaise clé" });
+  req.client = client;
+  next();
+}
+
+// --- ROUTES API ---
+
+// ✅ NOUVEAU : Health check
+app.get("/health", (req, res) => {
+  const uptime = process.uptime();
+  const memoryUsage = process.memoryUsage();
   
-  const validMode = (mode === "chrono") ? "chrono" : "timer";
-  const s = ensureOverlayState(room, "timer_chrono");
-  
-  s.data.mode = validMode;
-  s.data.seconds = (validMode === "timer") ? 60 : 0; // Reset au défaut
-  
-  console.log(`🔄 [TIMER] ${room} - Mode: ${validMode}`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "set_mode",
-    mode: validMode
+  res.json({
+    status: "ok",
+    version: "5.9",
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(uptime),
+    memory: {
+      heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + " MB",
+      heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024) + " MB"
+    },
+    supabase: supabaseEnabled ? "connected" : "disabled",
+    rooms: Object.keys(ROOMS).length
   });
 });
 
-// Configurer le temps (en secondes)
-socket.on("control:timer_set_time", (payload) => {
-  const { room, seconds } = payload;
-  if (!room || !Number.isFinite(seconds)) return;
-  
-  const s = ensureOverlayState(room, "timer_chrono");
-  const clampedSeconds = Math.max(0, Math.min(seconds, 99 * 60 + 59)); // Max 99:59
-  
-  s.data.seconds = clampedSeconds;
-  
-  console.log(`⏱️ [TIMER] ${room} - Temps configuré: ${clampedSeconds}s`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "set_time",
-    seconds: clampedSeconds
-  });
+app.get("/", (req, res) => res.send("MDI Server V5.9 Pro Online"));
+
+app.get("/debug/questions", async (req, res) => {
+  const room = String(req.query.room || "").trim();
+  if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room" });
+  const { data } = await supabase.from("questions").select("*").eq("room_id", room).order("order_index");
+  res.json({ ok: true, data: data || [] });
 });
 
-// Incrémenter/décrémenter le temps
-socket.on("control:timer_increment_time", (payload) => {
-  const { room, seconds } = payload;
-  if (!room || !Number.isFinite(seconds)) return;
-  
-  const s = ensureOverlayState(room, "timer_chrono");
-  const currentSeconds = s.data.seconds || 0;
-  const newSeconds = Math.max(0, Math.min(currentSeconds + seconds, 99 * 60 + 59));
-  
-  s.data.seconds = newSeconds;
-  
-  console.log(`➕➖ [TIMER] ${room} - Ajustement: ${seconds > 0 ? '+' : ''}${seconds}s → ${newSeconds}s`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "increment_time",
-    seconds: seconds
-  });
-});
-
-// Démarrer
-socket.on("control:timer_start", (payload) => {
-  const { room } = payload;
-  if (!room) return;
-  
-  console.log(`▶️ [TIMER] ${room} - Start`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "start"
-  });
-});
-
-// Pause
-socket.on("control:timer_pause", (payload) => {
-  const { room } = payload;
-  if (!room) return;
-  
-  console.log(`⏸️ [TIMER] ${room} - Pause`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "pause"
-  });
-});
-
-// Toggle pause/resume
-socket.on("control:timer_toggle_pause", (payload) => {
-  const { room } = payload;
-  if (!room) return;
-  
-  console.log(`⏯️ [TIMER] ${room} - Toggle pause`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "toggle_pause"
-  });
-});
-
-// Reset
-socket.on("control:timer_reset", (payload) => {
-  const { room } = payload;
-  if (!room) return;
-  
-  console.log(`🔄 [TIMER] ${room} - Reset`);
-  
-  io.to(room).emit("control:timer_chrono", {
-    action: "reset"
-  });
-});
-
-/* ============================================================
-   ÉTAPE 3 : AJOUTER LA ROUTE API /api/timer/status
-   ============================================================
-   Ajouter cette route AVANT app.post("/api/admin/...")
-   Cette route permet au Stream Deck d'afficher le temps actuel
-*/
-
+// ✅ NOUVEAU : Timer status endpoint
 app.get("/api/timer/status", async (req, res) => {
   const roomId = req.headers["x-room-id"];
   const roomKey = req.headers["x-room-key"];
@@ -151,7 +151,6 @@ app.get("/api/timer/status", async (req, res) => {
     return res.status(503).json({ ok: false, error: "no_db" });
   }
   
-  // Vérification auth
   const { data: client } = await supabase
     .from("clients")
     .select("*")
@@ -163,19 +162,17 @@ app.get("/api/timer/status", async (req, res) => {
     return res.status(403).json({ ok: false, error: "unauthorized" });
   }
   
-  // Récupérer l'état timer
   const room = getRoom(roomId);
   const timerState = room.overlays["timer_chrono"] || { state: "idle", data: {} };
   
   const mode = timerState.data.mode || "timer";
   const seconds = timerState.data.seconds || 0;
   
-  // Formatter pour affichage
   const mm = Math.floor(seconds / 60);
   const ss = seconds % 60;
   const display = mode === "timer" 
     ? `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
-    : `00:00:00`; // Chrono démarre toujours à 0
+    : `00:00:00`;
   
   res.json({
     ok: true,
@@ -186,13 +183,7 @@ app.get("/api/timer/status", async (req, res) => {
   });
 });
 
-/* ============================================================
-   ÉTAPE 4 : AJOUTER LA ROUTE API /api/control (STREAM DECK)
-   ============================================================
-   Ajouter cette route AVANT app.post("/api/admin/...")
-   Cette route unifie tous les contrôles pour Stream Deck
-*/
-
+// ✅ NOUVEAU : API control pour Stream Deck
 app.post("/api/control", async (req, res) => {
   const roomId = req.headers["x-room-id"];
   const roomKey = req.headers["x-room-key"];
@@ -202,7 +193,6 @@ app.post("/api/control", async (req, res) => {
     return res.status(503).json({ ok: false, error: "no_db" });
   }
   
-  // Vérification auth
   const { data: client } = await supabase
     .from("clients")
     .select("*")
@@ -216,10 +206,7 @@ app.post("/api/control", async (req, res) => {
   
   console.log(`🎮 [API] ${roomId} - Action: ${action}`, payload);
   
-  // Router l'action vers le bon handler
   const room = roomId;
-  
-  // ===== TIMER/CHRONO ACTIONS =====
   
   // Presets rapides
   if (action === "timer_preset") {
@@ -230,7 +217,7 @@ app.post("/api/control", async (req, res) => {
     }
   }
   
-  // Incréments spécifiques (boutons +/-)
+  // Incréments
   if (action === "timer_add_10min") {
     io.to(room).emit("control:timer_increment_time", { room, seconds: 600 });
     return res.json({ ok: true, action: "timer_add_10min" });
@@ -248,7 +235,7 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action: "timer_add_1sec" });
   }
   
-  // Décréments spécifiques (boutons -)
+  // Décréments
   if (action === "timer_sub_10min") {
     io.to(room).emit("control:timer_increment_time", { room, seconds: -600 });
     return res.json({ ok: true, action: "timer_sub_10min" });
@@ -294,31 +281,399 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action: "timer_mode_timer" });
   }
   
-  // Action inconnue
   res.status(400).json({ ok: false, error: "unknown_action", action });
 });
 
-/* ============================================================
-   ✅ INSTALLATION COMPLÈTE
-   ============================================================
-   
-   1. Copier les sections ci-dessus dans server.js V5.8
-   2. Redémarrer le serveur
-   3. Tester avec la télécommande ou Stream Deck
-   
-   🎯 EVENTS DISPONIBLES :
-   
-   Socket.io (interne) :
-   - control:timer_set_mode
-   - control:timer_set_time
-   - control:timer_increment_time
-   - control:timer_start
-   - control:timer_pause
-   - control:timer_toggle_pause
-   - control:timer_reset
-   
-   API REST (Stream Deck) :
-   - POST /api/control avec actions timer_*
-   - GET /api/timer/status pour affichage
-   
-   ============================================================ */
+// Admin API
+app.get("/api/admin/data", requireAdmin, async (req, res) => {
+  const { data: c } = await supabase.from("clients").select("*").order("created_at");
+  const { data: q } = await supabase.from("questions").select("*").order("room_id").order("order_index");
+  res.json({ ok: true, clients: c||[], questions: q||[] });
+});
+
+app.post("/api/admin/client", requireAdmin, async (req, res) => {
+  const { error } = await supabase.from("clients").upsert(req.body, { onConflict: "room_id" });
+  res.json({ ok: !error, error: error?.message });
+});
+
+app.post("/api/admin/question", requireAdmin, async (req, res) => {
+  const qData = req.body;
+  const { data: existing } = await supabase.from("questions").select("id").eq("room_id", qData.room_id).eq("question_key", qData.question_key).maybeSingle();
+  let error;
+  if (existing) { error = (await supabase.from("questions").update(qData).eq("id", existing.id)).error; }
+  else { error = (await supabase.from("questions").insert([qData])).error; }
+  res.json({ ok: !error, error: error?.message });
+});
+
+app.post("/api/admin/delete-question", requireAdmin, async (req, res) => {
+  const { error } = await supabase.from("questions").delete().match(req.body);
+  res.json({ ok: !error, error: error?.message });
+});
+
+// Client API
+app.get("/api/client/questions", requireClientAuth, async (req, res) => {
+  const { data } = await supabase.from("questions").select("*").eq("room_id", req.client.room_id).order("order_index");
+  res.json({ ok: true, questions: data || [] });
+});
+
+app.post("/api/client/save-question", requireClientAuth, async (req, res) => {
+  const qData = { ...req.body, room_id: req.client.room_id };
+  const { data: existing } = await supabase.from("questions").select("id").eq("room_id", qData.room_id).eq("question_key", qData.question_key).maybeSingle();
+  let error;
+  if (existing) { error = (await supabase.from("questions").update(qData).eq("id", existing.id)).error; }
+  else { error = (await supabase.from("questions").insert([qData])).error; }
+  res.json({ ok: !error, error: error?.message });
+});
+
+app.post("/api/client/delete-question", requireClientAuth, async (req, res) => {
+  const { error } = await supabase.from("questions").delete().match({ room_id: req.client.room_id, question_key: req.body.question_key });
+  res.json({ ok: !error, error: error?.message });
+});
+
+// --- GESTION DES SOCKETS ---
+io.on("connection", (socket) => {
+  socket.on("rejoindre_salle", (roomId) => socket.join(roomId));
+
+  socket.on("overlay:join", async (p) => {
+    if (!supabaseEnabled) return;
+    const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
+    if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", {reason:"auth"});
+    socket.join(p.room);
+
+    const s = ensureOverlayState(p.room, p.overlay);
+    if (p.overlay === "quiz_ou_sondage") {
+      const r = getRoom(p.room);
+      if (r.history.length > 0) s.data.percents = calculatePercents(getVoteStats(r.history));
+    }
+    socket.emit("overlay:state", { overlay: p.overlay, state: s.state, data: s.data });
+  });
+
+  socket.on("control:activate_overlay", (payload) => {
+    const { room, overlay } = payload;
+    const s = ensureOverlayState(room, overlay);
+    
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    
+    if (overlay === "nuage_de_mots") {
+      s.data.words = {};
+    }
+    if (overlay === "roue_loto") {
+      s.data.participants = [];
+    }
+    
+    console.log(`✅ [${room}] Overlay "${overlay}" activé`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay,
+      state: "active",
+      data: s.data
+    });
+  });
+
+  socket.on("control:deactivate_overlay", (payload) => {
+    const { room, overlay } = payload;
+    const s = ensureOverlayState(room, overlay);
+    s.state = "idle";
+    
+    console.log(`🔴 [${room}] Overlay "${overlay}" désactivé`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay,
+      state: "idle",
+      data: {}
+    });
+  });
+
+  socket.on("nouveau_vote", (payload) => {
+    const room = payload.room;
+    const user = payload.user || "Anonyme";
+    const rawVoteOriginal = String(payload.vote || "");
+    const rawVote = normalizeVoteText(rawVoteOriginal);
+
+    if (room && rawVote) {
+      const r = getRoom(room);
+
+      const choice = extractChoiceABCD(rawVote);
+      if (choice) {
+        const alreadyVoted = r.history.find(v => v.user === user && user !== "Anonyme");
+        if (!alreadyVoted) {
+          r.history.push({ user, choice, time: Date.now() });
+
+          const s = ensureOverlayState(room, "quiz_ou_sondage");
+          s.data.percents = calculatePercents(getVoteStats(r.history));
+
+          io.to(room).emit("overlay:state", {
+            overlay: "quiz_ou_sondage",
+            state: s.state,
+            data: s.data
+          });
+        }
+      }
+
+      Object.keys(r.overlays).forEach(overlayName => {
+        const overlay = r.overlays[overlayName];
+        
+        if (overlay.state !== "active") return;
+        
+        if (overlayName === "nuage_de_mots") {
+          if (!overlay.data.words) overlay.data.words = {};
+          
+          const word = rawVote.trim().toLowerCase();
+          
+          if (choice) return;
+          
+          const words = word.split(/\s+/).filter(Boolean);
+          if (words.length > 6 || word.length > 60) return;
+          
+          overlay.data.words[word] = (overlay.data.words[word] || 0) + 1;
+          
+          io.to(room).emit("overlay:state", {
+            overlay: overlayName,
+            state: "active",
+            data: overlay.data
+          });
+        }
+        
+        if (overlayName === "roue_loto") {
+          if (!overlay.data.participants) overlay.data.participants = [];
+          
+          if (user !== "Anonyme" && !overlay.data.participants.includes(user)) {
+            overlay.data.participants.push(user);
+            
+            io.to(room).emit("overlay:state", {
+              overlay: overlayName,
+              state: "active",
+              data: overlay.data
+            });
+          }
+        }
+      });
+
+      io.to(room).emit("raw_vote", { user, vote: rawVote });
+    }
+  });
+
+  socket.on("control:set_state", (p) => {
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = p.state;
+
+    if (p.state === "winner" && p.overlay === "quiz_ou_sondage") {
+      const q = s.data.question;
+      const r = getRoom(p.room);
+      let winnerText = "Personne";
+
+      if (q && q.type === "quiz" && q.correct) {
+        const winners = r.history.filter(v => v.choice === q.correct);
+        if (winners.length > 0) {
+          winners.sort((a,b) => a.time - b.time);
+          winnerText = winners[0].user === "Anonyme" ? "Quelqu'un (Anonyme)" : winners[0].user;
+        } else {
+          winnerText = "Aucune bonne réponse";
+        }
+      }
+      else if (q && q.type === "poll") {
+        const stats = getVoteStats(r.history);
+        const max = Math.max(stats.A, stats.B, stats.C, stats.D);
+        const winnerKey = ["A","B","C","D"].find(k => stats[k] === max);
+        winnerText = q.options[winnerKey] || "Egalité";
+      }
+      s.data.winnerName = winnerText;
+    }
+
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: s.data });
+  });
+
+  socket.on("control:load_question", async (p) => {
+    const r = getRoom(p.room);
+    r.history = [];
+
+    const { data: q } = await supabase
+      .from("questions")
+      .select("*")
+      .eq("room_id", p.room)
+      .eq("question_key", p.question_key)
+      .maybeSingle();
+
+    if (!q) return;
+
+    const question = {
+      id: q.question_key,
+      type: q.type,
+      prompt: q.prompt,
+      options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
+      correct: q.type === "quiz" ? q.correct_option : null,
+    };
+
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "question";
+    s.data = { question, percents: {A:0, B:0, C:0, D:0} };
+
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "question", data: s.data });
+  });
+
+  socket.on("control:show_options", (p) => {
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "options";
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "options", data: s.data });
+  });
+
+  socket.on("control:idle", (p) => {
+    const s = ensureOverlayState(p.room, p.overlay);
+    s.state = "idle";
+    io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
+  });
+
+  socket.on("roue:start_collect", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.state = "collecting";
+    s.data.participants = [];
+    
+    console.log(`📝 [ROUE] ${p.room} - Démarrage collecte`);
+    
+    io.to(p.room).emit("roue:start_collect");
+  });
+
+  socket.on("roue:stop_collect", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "collecting") {
+      s.state = "ready";
+      console.log(`🔒 [ROUE] ${p.room} - Fermeture collecte`);
+      io.to(p.room).emit("roue:stop_collect");
+    }
+  });
+
+  socket.on("roue:spin", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "ready") {
+      s.state = "spinning";
+      console.log(`🎡 [ROUE] ${p.room} - SPIN`);
+      io.to(p.room).emit("roue:spin");
+    }
+  });
+
+  socket.on("roue:reset", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.state = "idle";
+    s.data.participants = [];
+    
+    console.log(`🔄 [ROUE] ${p.room} - Reset`);
+    
+    io.to(p.room).emit("roue:reset");
+  });
+
+  socket.on("roue:add_participant", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "collecting") {
+      if (!s.data.participants) s.data.participants = [];
+      
+      const name = String(p.name || "").trim();
+      if (name && !s.data.participants.includes(name)) {
+        s.data.participants.push(name);
+        io.to(p.room).emit("roue:participant_added", { name });
+      }
+    }
+  });
+
+  /* ===== TIMER/CHRONO HANDLERS ===== */
+
+  socket.on("control:timer_set_mode", (payload) => {
+    const { room, mode } = payload;
+    if (!room) return;
+    
+    const validMode = (mode === "chrono") ? "chrono" : "timer";
+    const s = ensureOverlayState(room, "timer_chrono");
+    
+    s.data.mode = validMode;
+    s.data.seconds = (validMode === "timer") ? 60 : 0;
+    
+    console.log(`🔄 [TIMER] ${room} - Mode: ${validMode}`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "set_mode",
+      mode: validMode
+    });
+  });
+
+  socket.on("control:timer_set_time", (payload) => {
+    const { room, seconds } = payload;
+    if (!room || !Number.isFinite(seconds)) return;
+    
+    const s = ensureOverlayState(room, "timer_chrono");
+    const clampedSeconds = Math.max(0, Math.min(seconds, 99 * 60 + 59));
+    
+    s.data.seconds = clampedSeconds;
+    
+    console.log(`⏱️ [TIMER] ${room} - Temps configuré: ${clampedSeconds}s`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "set_time",
+      seconds: clampedSeconds
+    });
+  });
+
+  socket.on("control:timer_increment_time", (payload) => {
+    const { room, seconds } = payload;
+    if (!room || !Number.isFinite(seconds)) return;
+    
+    const s = ensureOverlayState(room, "timer_chrono");
+    const currentSeconds = s.data.seconds || 0;
+    const newSeconds = Math.max(0, Math.min(currentSeconds + seconds, 99 * 60 + 59));
+    
+    s.data.seconds = newSeconds;
+    
+    console.log(`➕➖ [TIMER] ${room} - Ajustement: ${seconds > 0 ? '+' : ''}${seconds}s → ${newSeconds}s`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "increment_time",
+      seconds: seconds
+    });
+  });
+
+  socket.on("control:timer_start", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    console.log(`▶️ [TIMER] ${room} - Start`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "start"
+    });
+  });
+
+  socket.on("control:timer_pause", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    console.log(`⏸️ [TIMER] ${room} - Pause`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "pause"
+    });
+  });
+
+  socket.on("control:timer_toggle_pause", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    console.log(`⏯️ [TIMER] ${room} - Toggle pause`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "toggle_pause"
+    });
+  });
+
+  socket.on("control:timer_reset", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    console.log(`🔄 [TIMER] ${room} - Reset`);
+    
+    io.to(room).emit("control:timer_chrono", {
+      action: "reset"
+    });
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.9 Pro Online on ${PORT}`));
