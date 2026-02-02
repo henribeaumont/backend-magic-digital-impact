@@ -1,6 +1,7 @@
 // ============================================================
-// MDI SERVER V5.8 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
-// ✅ NOUVEAU : Events roue loto (start_collect, stop_collect, spin, reset)
+// MDI SERVER V5.9 - STABLE & AGNOSTIQUE (ÉDITION SAAS PRO)
+// ✅ NOUVEAU : Baseline anti-pollution pour overlays sélectionnés
+// ✅ CONSERVÉ : Events roue loto (start_collect, stop_collect, spin, reset)
 // ✅ CONSERVÉ : Système d'état unifié pour nuage_de_mots et roue_loto
 // ✅ CONSERVÉ : Tous les overlays existants (quiz, tug_of_war, emoji_tornado)
 // ✅ ZÉRO RÉGRESSION : raw_vote toujours émis pour compatibilité
@@ -199,13 +200,33 @@ io.on("connection", (socket) => {
      ✅ NOUVEAU : Activation/désactivation des overlays
      - Utilisé par nuage_de_mots et roue_loto
      - Reset les données au moment de l'activation
+     - ✅ V5.9 : Baseline anti-pollution
   ============================================================ */
   socket.on("control:activate_overlay", (payload) => {
     const { room, overlay } = payload;
     const s = ensureOverlayState(room, overlay);
+    const r = getRoom(room);
     
     s.state = "active";
     s.data.activatedAt = Date.now(); // Timestamp serveur
+    
+    // ✅ Baseline pour overlays sélectionnés (protection pollution)
+    const OVERLAYS_WITH_BASELINE = [
+      "nuage_de_mots",
+      "roue_loto",
+      "tug_of_war",
+      "decompte_poker",
+      "mot_magique",
+      "decompte_bonhomme"
+    ];
+    
+    if (OVERLAYS_WITH_BASELINE.includes(overlay)) {
+      // Snapshot des 100 derniers messages pour baseline
+      s.data.baseline = new Set(
+        r.history.slice(-100).map(v => String(v.vote || "").toLowerCase().trim())
+      );
+      console.log(`🛡️ [${room}] Baseline créée pour "${overlay}" (${s.data.baseline.size} messages)`);
+    }
     
     // ✅ Reset des données spécifiques selon l'overlay
     if (overlay === "nuage_de_mots") {
@@ -243,6 +264,7 @@ io.on("connection", (socket) => {
      - Conserve le comportement existant pour quiz
      - Ajoute dispatch conditionnel pour nuage_de_mots et roue_loto
      - ✅ CONSERVE l'émission raw_vote (compatibilité totale)
+     - ✅ V5.9 : Vérification baseline anti-pollution
   ============================================================ */
   socket.on("nouveau_vote", (payload) => {
     const room = payload.room;
@@ -258,7 +280,7 @@ io.on("connection", (socket) => {
       if (choice) {
         const alreadyVoted = r.history.find(v => v.user === user && user !== "Anonyme");
         if (!alreadyVoted) {
-          r.history.push({ user, choice, time: Date.now() });
+          r.history.push({ user, choice, time: Date.now(), vote: rawVoteOriginal });
 
           const s = ensureOverlayState(room, "quiz_ou_sondage");
           s.data.percents = calculatePercents(getVoteStats(r.history));
@@ -277,6 +299,17 @@ io.on("connection", (socket) => {
         
         // ❌ Ignore si l'overlay n'est pas en état "active"
         if (overlay.state !== "active") return;
+        
+        // ✅ V5.9 : Vérification baseline (protection pollution)
+        if (overlay.data.baseline) {
+          const voteKey = rawVote.toLowerCase().trim();
+          if (overlay.data.baseline.has(voteKey)) {
+            console.log(`⚠️ [${overlayName}] Message baseline ignoré: "${rawVoteOriginal}"`);
+            return; // ← STOP ICI, message déjà vu avant activation
+          }
+          // Ajouter à baseline pour éviter doublons futurs
+          overlay.data.baseline.add(voteKey);
+        }
         
         // ✅ Traitement nuage de mots
         if (overlayName === "nuage_de_mots") {
@@ -455,4 +488,4 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.8 Pro Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.9 Pro Online on ${PORT}`));
