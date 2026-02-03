@@ -1,6 +1,8 @@
 // ============================================================
-// MDI SERVER V5.9 - COMPLET (TIMER/CHRONO INTÉGRÉ)
+// MDI SERVER V5.10 - COMPLET (TIMER + COMMENTAIRES + MATCH)
 // ✅ Support timer/chrono avec API Stream Deck
+// ✅ Support overlay commentaires (gestion flux/queue)
+// ✅ Support overlay match équipes (scores A/B)
 // ✅ Health check endpoint (/health)
 // ✅ Tous les overlays existants préservés
 // ✅ ZÉRO RÉGRESSION
@@ -281,6 +283,41 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action: "timer_mode_timer" });
   }
   
+  // Actions commentaires Stream Deck
+  if (action === "comment_show") {
+    const messageId = payload?.messageId;
+    if (messageId) {
+      io.to(room).emit("control:comment_show", { room, messageId });
+      return res.json({ ok: true, action: "comment_show", messageId });
+    }
+  }
+  if (action === "comment_hide") {
+    io.to(room).emit("control:comment_hide", { room });
+    return res.json({ ok: true, action: "comment_hide" });
+  }
+  
+  // Actions match Stream Deck
+  if (action === "match_team_a_increment") {
+    io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: 1 });
+    return res.json({ ok: true, action: "match_team_a_increment" });
+  }
+  if (action === "match_team_a_decrement") {
+    io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: -1 });
+    return res.json({ ok: true, action: "match_team_a_decrement" });
+  }
+  if (action === "match_team_b_increment") {
+    io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: 1 });
+    return res.json({ ok: true, action: "match_team_b_increment" });
+  }
+  if (action === "match_team_b_decrement") {
+    io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: -1 });
+    return res.json({ ok: true, action: "match_team_b_decrement" });
+  }
+  if (action === "match_reset") {
+    io.to(room).emit("control:match_reset", { room });
+    return res.json({ ok: true, action: "match_reset" });
+  }
+  
   res.status(400).json({ ok: false, error: "unknown_action", action });
 });
 
@@ -360,6 +397,16 @@ io.on("connection", (socket) => {
     }
     if (overlay === "roue_loto") {
       s.data.participants = [];
+    }
+    if (overlay === "commentaires") {
+      s.data.flux = [];
+      s.data.queue = [];
+      s.data.current = null;
+      s.data.minWords = 4;
+    }
+    if (overlay === "match_equipes") {
+      s.data.teamA = { name: "ÉQUIPE A", score: 0 };
+      s.data.teamB = { name: "ÉQUIPE B", score: 0 };
     }
     
     console.log(`✅ [${room}] Overlay "${overlay}" activé`);
@@ -447,6 +494,37 @@ io.on("connection", (socket) => {
               data: overlay.data
             });
           }
+        }
+        
+        if (overlayName === "commentaires") {
+          const minWords = overlay.data.minWords || 4;
+          const wordCount = rawVote.split(/\s+/).filter(Boolean).length;
+          
+          if (wordCount < minWords) return;
+          
+          const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const newMessage = {
+            id: msgId,
+            author: user,
+            text: rawVote,
+            timestamp: Date.now(),
+            sent: false
+          };
+          
+          if (!overlay.data.flux) overlay.data.flux = [];
+          overlay.data.flux.push(newMessage);
+          
+          if (overlay.data.flux.length > 50) {
+            overlay.data.flux = overlay.data.flux.slice(-50);
+          }
+          
+          io.to(room).emit("overlay:state", {
+            overlay: overlayName,
+            state: "active",
+            data: overlay.data
+          });
+          
+          console.log(`💬 [COMMENTAIRES] ${room} - Nouveau: "${rawVote.substring(0, 30)}..."`);
         }
       });
 
@@ -673,7 +751,173 @@ io.on("connection", (socket) => {
       action: "reset"
     });
   });
+
+  // ============================================================
+  // HANDLERS COMMENTAIRES
+  // ============================================================
+  
+  socket.on("control:comment_to_queue", (payload) => {
+    const { room, messageId } = payload;
+    if (!room || !messageId) return;
+    
+    const s = ensureOverlayState(room, "commentaires");
+    const msgIndex = s.data.flux.findIndex(m => m.id === messageId);
+    if (msgIndex === -1) return;
+    
+    const message = s.data.flux[msgIndex];
+    message.sent = true;
+    
+    if (!s.data.queue) s.data.queue = [];
+    s.data.queue.push({ ...message, displayed: false });
+    
+    console.log(`→ [COMMENTAIRES] ${room} - Message ${messageId} → queue`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "commentaires",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  socket.on("control:comment_show", (payload) => {
+    const { room, messageId } = payload;
+    if (!room || !messageId) return;
+    
+    const s = ensureOverlayState(room, "commentaires");
+    const message = s.data.queue.find(m => m.id === messageId);
+    if (!message) return;
+    
+    message.displayed = true;
+    s.data.current = {
+      id: message.id,
+      author: message.author,
+      text: message.text
+    };
+    
+    console.log(`👁️ [COMMENTAIRES] ${room} - Affichage: "${message.text.substring(0, 30)}..."`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "commentaires",
+      state: "active",
+      data: s.data
+    });
+  });
+
+  socket.on("control:comment_hide", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    const s = ensureOverlayState(room, "commentaires");
+    s.data.current = null;
+    
+    console.log(`🙈 [COMMENTAIRES] ${room} - Commentaire masqué`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "commentaires",
+      state: "active",
+      data: s.data
+    });
+  });
+
+  socket.on("control:comment_delete", (payload) => {
+    const { room, column, messageId } = payload;
+    if (!room || !column || !messageId) return;
+    
+    const s = ensureOverlayState(room, "commentaires");
+    
+    if (column === "flux") {
+      s.data.flux = s.data.flux.filter(m => m.id !== messageId);
+    } else if (column === "queue") {
+      s.data.queue = s.data.queue.filter(m => m.id !== messageId);
+      if (s.data.current && s.data.current.id === messageId) {
+        s.data.current = null;
+      }
+    }
+    
+    console.log(`❌ [COMMENTAIRES] ${room} - Message ${messageId} supprimé (${column})`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "commentaires",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  socket.on("control:comment_reset_flux", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    const s = ensureOverlayState(room, "commentaires");
+    s.data.flux = [];
+    
+    console.log(`🧹 [COMMENTAIRES] ${room} - Flux nettoyé`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "commentaires",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  socket.on("control:comment_reset_queue", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    const s = ensureOverlayState(room, "commentaires");
+    s.data.queue = [];
+    s.data.current = null;
+    
+    console.log(`🧹 [COMMENTAIRES] ${room} - Queue vidée`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "commentaires",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  // ============================================================
+  // HANDLERS MATCH ÉQUIPES
+  // ============================================================
+  
+  socket.on("control:match_adjust_score", (payload) => {
+    const { room, team, delta } = payload;
+    if (!room || !team || delta === undefined) return;
+    
+    const s = ensureOverlayState(room, "match_equipes");
+    
+    if (team === 'A') {
+      s.data.teamA.score = Math.max(0, s.data.teamA.score + delta);
+    } else if (team === 'B') {
+      s.data.teamB.score = Math.max(0, s.data.teamB.score + delta);
+    }
+    
+    console.log(`📊 [MATCH] ${room} - ${team} ${delta > 0 ? '+' : ''}${delta} → ${team === 'A' ? s.data.teamA.score : s.data.teamB.score}`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "match_equipes",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  socket.on("control:match_reset", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    
+    const s = ensureOverlayState(room, "match_equipes");
+    s.data.teamA.score = 0;
+    s.data.teamB.score = 0;
+    
+    console.log(`🔄 [MATCH] ${room} - Reset 0-0`);
+    
+    io.to(room).emit("overlay:state", {
+      overlay: "match_equipes",
+      state: s.state,
+      data: s.data
+    });
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.9 Pro Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.10 Complete Online on ${PORT}`));
