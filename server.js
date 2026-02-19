@@ -1,12 +1,13 @@
 // ============================================================
-// MDI SERVER V5.10 - COMPLET (TIMER + COMMENTAIRES + MATCH)
-// ✅ Support timer/chrono avec API Stream Deck
-// ✅ Support overlay commentaires (gestion flux/queue)
-// ✅ Support overlay match équipes (scores A/B)
-// ✅ Health check endpoint (/health)
-// ✅ Tous les overlays existants préservés
-// ✅ ZÉRO RÉGRESSION
+// MDI SERVER V5.15 - COMPLET
+// ✅ Tout V5.14 préservé (ZÉRO RÉGRESSION)
+// ✅ NOUVEAU : overlay:online  → relaye overlay:presence { online: true }
+// ✅ NOUVEAU : overlay:offline → relaye overlay:presence { online: false }
+// ✅ NOUVEAU : overlay:presence_update → relaye overlay:presence { displaying }
+// ✅ NOUVEAU : disconnect auto → relaye overlay:presence { online: false }
+//    pour tous les overlays connus de ce socket
 // ============================================================
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -116,14 +117,12 @@ async function requireClientAuth(req, res, next) {
 
 // --- ROUTES API ---
 
-// ✅ NOUVEAU : Health check
 app.get("/health", (req, res) => {
   const uptime = process.uptime();
   const memoryUsage = process.memoryUsage();
-  
   res.json({
     status: "ok",
-    version: "5.9",
+    version: "5.15",
     timestamp: new Date().toISOString(),
     uptime: Math.floor(uptime),
     memory: {
@@ -135,7 +134,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/", (req, res) => res.send("MDI Server V5.9 Pro Online"));
+app.get("/", (req, res) => res.send("MDI Server V5.15 Online"));
 
 app.get("/debug/questions", async (req, res) => {
   const room = String(req.query.room || "").trim();
@@ -144,73 +143,66 @@ app.get("/debug/questions", async (req, res) => {
   res.json({ ok: true, data: data || [] });
 });
 
-// ✅ NOUVEAU : Timer status endpoint
 app.get("/api/timer/status", async (req, res) => {
   const roomId = req.headers["x-room-id"];
   const roomKey = req.headers["x-room-key"];
-  
+
   if (!supabaseEnabled) {
     return res.status(503).json({ ok: false, error: "no_db" });
   }
-  
+
   const { data: client } = await supabase
     .from("clients")
     .select("*")
     .eq("room_id", roomId)
     .limit(1)
     .maybeSingle();
-  
+
   if (!client || client.room_key !== roomKey) {
     return res.status(403).json({ ok: false, error: "unauthorized" });
   }
-  
+
   const room = getRoom(roomId);
   const timerState = room.overlays["timer_chrono"] || { state: "idle", data: {} };
-  
   const mode = timerState.data.mode || "timer";
   const seconds = timerState.data.seconds || 0;
-  
   const mm = Math.floor(seconds / 60);
   const ss = seconds % 60;
-  const display = mode === "timer" 
+  const display = mode === "timer"
     ? `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
     : `00:00:00`;
-  
-  res.json({
-    ok: true,
-    mode: mode,
-    state: timerState.state,
-    seconds: seconds,
-    display: display
-  });
+
+  res.json({ ok: true, mode, state: timerState.state, seconds, display });
 });
 
-// ✅ NOUVEAU : API control pour Stream Deck
+// API control pour Stream Deck
 app.post("/api/control", async (req, res) => {
   const roomId = req.headers["x-room-id"];
   const roomKey = req.headers["x-room-key"];
   const { action, payload } = req.body;
-  
+
   if (!supabaseEnabled) {
     return res.status(503).json({ ok: false, error: "no_db" });
   }
-  
+
   const { data: client } = await supabase
     .from("clients")
     .select("*")
     .eq("room_id", roomId)
     .limit(1)
     .maybeSingle();
-  
+
   if (!client || client.room_key !== roomKey) {
     return res.status(403).json({ ok: false, error: "unauthorized" });
   }
-  
+
   console.log(`🎮 [API] ${roomId} - Action: ${action}`, payload);
-  
+
   const room = roomId;
-  
-  // Presets rapides
+
+  // ============================================================
+  // TIMER — inchangé depuis V5.12
+  // ============================================================
   if (action === "timer_preset") {
     const seconds = parseInt(payload?.seconds, 10);
     if (Number.isFinite(seconds)) {
@@ -218,106 +210,308 @@ app.post("/api/control", async (req, res) => {
       return res.json({ ok: true, action: "timer_preset", seconds });
     }
   }
-  
-  // Incréments
-  if (action === "timer_add_10min") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: 600 });
-    return res.json({ ok: true, action: "timer_add_10min" });
-  }
-  if (action === "timer_add_1min") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: 60 });
-    return res.json({ ok: true, action: "timer_add_1min" });
-  }
-  if (action === "timer_add_10sec") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: 10 });
-    return res.json({ ok: true, action: "timer_add_10sec" });
-  }
-  if (action === "timer_add_1sec") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: 1 });
-    return res.json({ ok: true, action: "timer_add_1sec" });
-  }
-  
-  // Décréments
-  if (action === "timer_sub_10min") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: -600 });
-    return res.json({ ok: true, action: "timer_sub_10min" });
-  }
-  if (action === "timer_sub_1min") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: -60 });
-    return res.json({ ok: true, action: "timer_sub_1min" });
-  }
-  if (action === "timer_sub_10sec") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: -10 });
-    return res.json({ ok: true, action: "timer_sub_10sec" });
-  }
-  if (action === "timer_sub_1sec") {
-    io.to(room).emit("control:timer_increment_time", { room, seconds: -1 });
-    return res.json({ ok: true, action: "timer_sub_1sec" });
-  }
-  
-  // Contrôles
-  if (action === "timer_start") {
-    io.to(room).emit("control:timer_start", { room });
-    return res.json({ ok: true, action: "timer_start" });
-  }
-  if (action === "timer_pause") {
-    io.to(room).emit("control:timer_pause", { room });
-    return res.json({ ok: true, action: "timer_pause" });
-  }
-  if (action === "timer_reset") {
-    io.to(room).emit("control:timer_reset", { room });
-    return res.json({ ok: true, action: "timer_reset" });
-  }
-  if (action === "timer_toggle_pause") {
-    io.to(room).emit("control:timer_toggle_pause", { room });
-    return res.json({ ok: true, action: "timer_toggle_pause" });
-  }
-  
-  // Modes
-  if (action === "timer_mode_chrono") {
-    io.to(room).emit("control:timer_set_mode", { room, mode: "chrono" });
-    return res.json({ ok: true, action: "timer_mode_chrono" });
-  }
-  if (action === "timer_mode_timer") {
-    io.to(room).emit("control:timer_set_mode", { room, mode: "timer" });
-    return res.json({ ok: true, action: "timer_mode_timer" });
-  }
-  
-  // Actions commentaires Stream Deck
+  if (action === "timer_add_10min") { io.to(room).emit("control:timer_increment_time", { room, seconds: 600 });  return res.json({ ok: true, action }); }
+  if (action === "timer_add_1min")  { io.to(room).emit("control:timer_increment_time", { room, seconds: 60 });   return res.json({ ok: true, action }); }
+  if (action === "timer_add_10sec") { io.to(room).emit("control:timer_increment_time", { room, seconds: 10 });   return res.json({ ok: true, action }); }
+  if (action === "timer_add_1sec")  { io.to(room).emit("control:timer_increment_time", { room, seconds: 1 });    return res.json({ ok: true, action }); }
+  if (action === "timer_sub_10min") { io.to(room).emit("control:timer_increment_time", { room, seconds: -600 }); return res.json({ ok: true, action }); }
+  if (action === "timer_sub_1min")  { io.to(room).emit("control:timer_increment_time", { room, seconds: -60 });  return res.json({ ok: true, action }); }
+  if (action === "timer_sub_10sec") { io.to(room).emit("control:timer_increment_time", { room, seconds: -10 });  return res.json({ ok: true, action }); }
+  if (action === "timer_sub_1sec")  { io.to(room).emit("control:timer_increment_time", { room, seconds: -1 });   return res.json({ ok: true, action }); }
+  if (action === "timer_start")        { io.to(room).emit("control:timer_start", { room });        return res.json({ ok: true, action }); }
+  if (action === "timer_pause")        { io.to(room).emit("control:timer_pause", { room });        return res.json({ ok: true, action }); }
+  if (action === "timer_reset")        { io.to(room).emit("control:timer_reset", { room });        return res.json({ ok: true, action }); }
+  if (action === "timer_toggle_pause") { io.to(room).emit("control:timer_toggle_pause", { room }); return res.json({ ok: true, action }); }
+  if (action === "timer_mode_chrono")  { io.to(room).emit("control:timer_set_mode", { room, mode: "chrono" }); return res.json({ ok: true, action }); }
+  if (action === "timer_mode_timer")   { io.to(room).emit("control:timer_set_mode", { room, mode: "timer" });  return res.json({ ok: true, action }); }
+
+  // ============================================================
+  // COMMENTAIRES — inchangé depuis V5.12 + nouvelles actions
+  // ============================================================
   if (action === "comment_show") {
     const messageId = payload?.messageId;
     if (messageId) {
       io.to(room).emit("control:comment_show", { room, messageId });
-      return res.json({ ok: true, action: "comment_show", messageId });
+      return res.json({ ok: true, action, messageId });
     }
   }
-  if (action === "comment_hide") {
-    io.to(room).emit("control:comment_hide", { room });
-    return res.json({ ok: true, action: "comment_hide" });
+  if (action === "comment_hide") { io.to(room).emit("control:comment_hide", { room }); return res.json({ ok: true, action }); }
+
+  // ✅ NOUVEAU V5.13 : activation/désactivation overlay commentaires
+  if (action === "commentaires_on") {
+    const s = ensureOverlayState(room, "commentaires");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    if (!s.data.flux)    s.data.flux    = [];
+    if (!s.data.queue)   s.data.queue   = [];
+    if (!s.data.current) s.data.current = null;
+    if (!s.data.minWords) s.data.minWords = 4;
+    console.log(`🎮 [API] ${room} - Commentaires ON`);
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: s.data });
+    return res.json({ ok: true, action });
   }
-  
-  // Actions match Stream Deck
-  if (action === "match_team_a_increment") {
-    io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: 1 });
-    return res.json({ ok: true, action: "match_team_a_increment" });
+  if (action === "commentaires_off") {
+    const s = ensureOverlayState(room, "commentaires");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Commentaires OFF`);
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: "idle", data: {} });
+    return res.json({ ok: true, action });
   }
-  if (action === "match_team_a_decrement") {
-    io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: -1 });
-    return res.json({ ok: true, action: "match_team_a_decrement" });
+
+  // ============================================================
+  // MATCH — inchangé depuis V5.12
+  // ============================================================
+  if (action === "match_team_a_increment") { io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: 1 });  return res.json({ ok: true, action }); }
+  if (action === "match_team_a_decrement") { io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: -1 }); return res.json({ ok: true, action }); }
+  if (action === "match_team_b_increment") { io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: 1 });  return res.json({ ok: true, action }); }
+  if (action === "match_team_b_decrement") { io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: -1 }); return res.json({ ok: true, action }); }
+  if (action === "match_reset")            { io.to(room).emit("control:match_reset", { room }); return res.json({ ok: true, action }); }
+
+  // ✅ NOUVEAU V5.14 : activation manuelle de l'overlay match depuis Stream Deck
+  // Utile si l'overlay a été rechargé ou perdu sa connexion
+  // match_off volontairement absent — l'overlay match est conçu pour être permanent
+  if (action === "match_on") {
+    const s = ensureOverlayState(room, "match_equipes");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    if (!s.data.teamA) s.data.teamA = { name: "ÉQUIPE A", score: 0 };
+    if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
+    console.log(`🎮 [API] ${room} - Match ON (scores A:${s.data.teamA.score} B:${s.data.teamB.score})`);
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: "active", data: s.data });
+    return res.json({ ok: true, action, scoreA: s.data.teamA.score, scoreB: s.data.teamB.score });
   }
-  if (action === "match_team_b_increment") {
-    io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: 1 });
-    return res.json({ ok: true, action: "match_team_b_increment" });
+
+  // ============================================================
+  // NUAGE DE MOTS — NOUVEAU V5.13
+  // ============================================================
+
+  // Activer l'overlay nuage (désactive roue et quiz si actifs)
+  if (action === "nuage_on") {
+    // Désactivation des overlays concurrents
+    const sRoue = ensureOverlayState(room, "roue_loto");
+    if (sRoue.state !== "idle") {
+      sRoue.state = "idle";
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "idle", data: {} });
+    }
+    const sQuiz = ensureOverlayState(room, "quiz_ou_sondage");
+    if (sQuiz.state !== "idle") {
+      sQuiz.state = "idle";
+      io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "idle", data: {} });
+    }
+    // Activation nuage
+    const s = ensureOverlayState(room, "nuage_de_mots");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    if (!s.data.words) s.data.words = {};
+    console.log(`🎮 [API] ${room} - Nuage ON`);
+    io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: "active", data: s.data });
+    return res.json({ ok: true, action });
   }
-  if (action === "match_team_b_decrement") {
-    io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: -1 });
-    return res.json({ ok: true, action: "match_team_b_decrement" });
+
+  // Désactiver l'overlay nuage
+  if (action === "nuage_off") {
+    const s = ensureOverlayState(room, "nuage_de_mots");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Nuage OFF`);
+    io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: "idle", data: {} });
+    return res.json({ ok: true, action });
   }
-  if (action === "match_reset") {
-    io.to(room).emit("control:match_reset", { room });
-    return res.json({ ok: true, action: "match_reset" });
+
+  // ============================================================
+  // ROUE LOTO — NOUVEAU V5.13
+  // ============================================================
+
+  // Activer l'overlay roue (désactive nuage et quiz si actifs)
+  if (action === "roue_on") {
+    // Désactivation des overlays concurrents
+    const sNuage = ensureOverlayState(room, "nuage_de_mots");
+    if (sNuage.state !== "idle") {
+      sNuage.state = "idle";
+      io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: "idle", data: {} });
+    }
+    const sQuiz = ensureOverlayState(room, "quiz_ou_sondage");
+    if (sQuiz.state !== "idle") {
+      sQuiz.state = "idle";
+      io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "idle", data: {} });
+    }
+    // Activation roue
+    const s = ensureOverlayState(room, "roue_loto");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    if (!s.data.participants)   s.data.participants   = [];
+    if (!s.data.consecutifMode) s.data.consecutifMode = false;
+    console.log(`🎮 [API] ${room} - Roue ON`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "active", data: s.data });
+    return res.json({ ok: true, action });
   }
-  
+
+  // Désactiver l'overlay roue
+  if (action === "roue_off") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Roue OFF`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  // Ouvrir la collecte de participants
+  if (action === "roue_start_collect") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.state = "collecting";
+    s.data.participants = [];
+    console.log(`🎮 [API] ${room} - Roue start collect`);
+    io.to(room).emit("roue:start_collect");
+    return res.json({ ok: true, action });
+  }
+
+  // Fermer la collecte (passe en "ready" → spin possible)
+  if (action === "roue_stop_collect") {
+    const s = ensureOverlayState(room, "roue_loto");
+    if (s.state === "collecting") {
+      s.state = "ready";
+      console.log(`🎮 [API] ${room} - Roue stop collect`);
+      io.to(room).emit("roue:stop_collect");
+    }
+    return res.json({ ok: true, action });
+  }
+
+  // Lancer la roue (seulement si état "ready")
+  if (action === "roue_spin") {
+    const s = ensureOverlayState(room, "roue_loto");
+    if (s.state !== "ready") {
+      return res.status(409).json({ ok: false, error: "roue_not_ready", state: s.state });
+    }
+    s.state = "spinning";
+    console.log(`🎮 [API] ${room} - Roue SPIN`);
+    io.to(room).emit("roue:spin");
+    return res.json({ ok: true, action });
+  }
+
+  // Réinitialiser la roue (vide la liste, retour à idle)
+  if (action === "roue_reset") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.state = "idle";
+    s.data.participants = [];
+    s.data.consecutifMode = false;
+    console.log(`🎮 [API] ${room} - Roue reset`);
+    io.to(room).emit("roue:reset");
+    return res.json({ ok: true, action });
+  }
+
+  // Activer le mode consécutif (gagnant retiré automatiquement après chaque spin)
+  if (action === "roue_consecutif_on") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.data.consecutifMode = true;
+    console.log(`🎮 [API] ${room} - Roue mode consécutif ON`);
+    return res.json({ ok: true, action });
+  }
+
+  // Désactiver le mode consécutif
+  if (action === "roue_consecutif_off") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.data.consecutifMode = false;
+    console.log(`🎮 [API] ${room} - Roue mode consécutif OFF`);
+    return res.json({ ok: true, action });
+  }
+
+  // ============================================================
+  // QUIZ / SONDAGE — NOUVEAU V5.13
+  // Nécessite Supabase pour charger les questions (déjà requis)
+  // ============================================================
+
+  // Charger une question et afficher l'overlay quiz
+  // payload attendu : { "question_key": "Q1" }
+  if (action === "quiz_load") {
+    const questionKey = payload?.question_key;
+    if (!questionKey) {
+      return res.status(400).json({ ok: false, error: "question_key_required" });
+    }
+    // Désactivation des overlays concurrents
+    const sNuage = ensureOverlayState(room, "nuage_de_mots");
+    if (sNuage.state !== "idle") {
+      sNuage.state = "idle";
+      io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: "idle", data: {} });
+    }
+    const sRoue = ensureOverlayState(room, "roue_loto");
+    if (sRoue.state !== "idle") {
+      sRoue.state = "idle";
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "idle", data: {} });
+    }
+    // Chargement de la question
+    const r = getRoom(room);
+    r.history = [];
+    const { data: q } = await supabase
+      .from("questions")
+      .select("*")
+      .eq("room_id", room)
+      .eq("question_key", questionKey)
+      .maybeSingle();
+    if (!q) {
+      return res.status(404).json({ ok: false, error: "question_not_found", question_key: questionKey });
+    }
+    const question = {
+      id: q.question_key,
+      type: q.type,
+      prompt: q.prompt,
+      options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
+      correct: q.type === "quiz" ? q.correct_option : null,
+    };
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    s.state = "question";
+    s.data = { question, percents: { A:0, B:0, C:0, D:0 } };
+    console.log(`🎮 [API] ${room} - Quiz chargé: ${questionKey}`);
+    io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "question", data: s.data });
+    return res.json({ ok: true, action, question_key: questionKey, type: q.type });
+  }
+
+  // Afficher les options de vote
+  if (action === "quiz_show_options") {
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    if (s.state === "idle") {
+      return res.status(409).json({ ok: false, error: "quiz_not_loaded" });
+    }
+    s.state = "options";
+    console.log(`🎮 [API] ${room} - Quiz show options`);
+    io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "options", data: s.data });
+    return res.json({ ok: true, action });
+  }
+
+  // Afficher les résultats (pourcentages)
+  if (action === "quiz_show_results") {
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    if (s.state === "idle") {
+      return res.status(409).json({ ok: false, error: "quiz_not_loaded" });
+    }
+    s.state = "results";
+    console.log(`🎮 [API] ${room} - Quiz show results`);
+    io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "results", data: s.data });
+    return res.json({ ok: true, action });
+  }
+
+  // Révéler la bonne réponse (quiz uniquement, pas sondage)
+  if (action === "quiz_reveal") {
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    if (s.state === "idle") {
+      return res.status(409).json({ ok: false, error: "quiz_not_loaded" });
+    }
+    if (s.data.question?.type === "poll") {
+      return res.status(409).json({ ok: false, error: "cannot_reveal_poll" });
+    }
+    s.state = "reveal";
+    console.log(`🎮 [API] ${room} - Quiz reveal`);
+    io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "reveal", data: s.data });
+    return res.json({ ok: true, action });
+  }
+
+  // Réinitialiser / masquer le quiz
+  if (action === "quiz_reset") {
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Quiz reset`);
+    io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
   res.status(400).json({ ok: false, error: "unknown_action", action });
 });
 
@@ -367,14 +561,82 @@ app.post("/api/client/delete-question", requireClientAuth, async (req, res) => {
   res.json({ ok: !error, error: error?.message });
 });
 
-// --- GESTION DES SOCKETS ---
+// ============================================================
+// GESTION DES SOCKETS
+// ============================================================
 io.on("connection", (socket) => {
+  // Registre des overlays connus pour ce socket
+  // Utilisé pour diffuser offline automatiquement à la déconnexion
+  const socketOverlays = []; // [{ room, overlay }]
+
   socket.on("rejoindre_salle", (roomId) => socket.join(roomId));
+
+  // ============================================================
+  // PRÉSENCE OVERLAYS — NOUVEAU V5.15
+  // ============================================================
+
+  // L'overlay signale qu'il est connecté et en ligne
+  socket.on("overlay:online", (p) => {
+    const { room, overlay } = p;
+    if (!room || !overlay) return;
+
+    // Mémoriser pour la gestion de déconnexion
+    if (!socketOverlays.find(o => o.room === room && o.overlay === overlay)) {
+      socketOverlays.push({ room, overlay });
+    }
+
+    console.log(`🟢 [PRÉSENCE] ${room} - ${overlay} : en ligne`);
+
+    // Notifier la télécommande
+    io.to(room).emit("overlay:presence", {
+      overlay,
+      online: true
+    });
+  });
+
+  // L'overlay signale explicitement qu'il part (rare — géré aussi par disconnect)
+  socket.on("overlay:offline", (p) => {
+    const { room, overlay } = p;
+    if (!room || !overlay) return;
+
+    console.log(`🔴 [PRÉSENCE] ${room} - ${overlay} : hors ligne (explicite)`);
+
+    io.to(room).emit("overlay:presence", {
+      overlay,
+      online: false,
+      displaying: false
+    });
+  });
+
+  // L'overlay met à jour son état d'affichage (displaying = visible à l'écran ou non)
+  socket.on("overlay:presence_update", (p) => {
+    const { room, overlay, displaying } = p;
+    if (!room || !overlay) return;
+
+    console.log(`📺 [PRÉSENCE] ${room} - ${overlay} : affichage = ${displaying}`);
+
+    io.to(room).emit("overlay:presence", {
+      overlay,
+      displaying: Boolean(displaying)
+    });
+  });
+
+  // Déconnexion socket → tous les overlays de ce socket passent offline
+  socket.on("disconnect", () => {
+    for (const { room, overlay } of socketOverlays) {
+      console.log(`🔴 [PRÉSENCE] ${room} - ${overlay} : hors ligne (disconnect)`);
+      io.to(room).emit("overlay:presence", {
+        overlay,
+        online: false,
+        displaying: false
+      });
+    }
+  });
 
   socket.on("overlay:join", async (p) => {
     if (!supabaseEnabled) return;
     const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
-    if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", {reason:"auth"});
+    if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", { reason: "auth" });
     socket.join(p.room);
 
     const s = ensureOverlayState(p.room, p.overlay);
@@ -388,15 +650,16 @@ io.on("connection", (socket) => {
   socket.on("control:activate_overlay", (payload) => {
     const { room, overlay } = payload;
     const s = ensureOverlayState(room, overlay);
-    
+
     s.state = "active";
     s.data.activatedAt = Date.now();
-    
+
     if (overlay === "nuage_de_mots") {
       s.data.words = {};
     }
     if (overlay === "roue_loto") {
       s.data.participants = [];
+      s.data.consecutifMode = false;
     }
     if (overlay === "commentaires") {
       s.data.flux = [];
@@ -408,9 +671,9 @@ io.on("connection", (socket) => {
       s.data.teamA = { name: "ÉQUIPE A", score: 0 };
       s.data.teamB = { name: "ÉQUIPE B", score: 0 };
     }
-    
+
     console.log(`✅ [${room}] Overlay "${overlay}" activé`);
-    
+
     io.to(room).emit("overlay:state", {
       overlay,
       state: "active",
@@ -422,9 +685,9 @@ io.on("connection", (socket) => {
     const { room, overlay } = payload;
     const s = ensureOverlayState(room, overlay);
     s.state = "idle";
-    
+
     console.log(`🔴 [${room}] Overlay "${overlay}" désactivé`);
-    
+
     io.to(room).emit("overlay:state", {
       overlay,
       state: "idle",
@@ -460,34 +723,27 @@ io.on("connection", (socket) => {
 
       Object.keys(r.overlays).forEach(overlayName => {
         const overlay = r.overlays[overlayName];
-        
+
         if (overlay.state !== "active") return;
-        
+
         if (overlayName === "nuage_de_mots") {
           if (!overlay.data.words) overlay.data.words = {};
-          
           const word = rawVote.trim().toLowerCase();
-          
           if (choice) return;
-          
           const words = word.split(/\s+/).filter(Boolean);
           if (words.length > 6 || word.length > 60) return;
-          
           overlay.data.words[word] = (overlay.data.words[word] || 0) + 1;
-          
           io.to(room).emit("overlay:state", {
             overlay: overlayName,
             state: "active",
             data: overlay.data
           });
         }
-        
+
         if (overlayName === "roue_loto") {
           if (!overlay.data.participants) overlay.data.participants = [];
-          
           if (user !== "Anonyme" && !overlay.data.participants.includes(user)) {
             overlay.data.participants.push(user);
-            
             io.to(room).emit("overlay:state", {
               overlay: overlayName,
               state: "active",
@@ -495,13 +751,12 @@ io.on("connection", (socket) => {
             });
           }
         }
-        
+
         if (overlayName === "commentaires") {
           const minWords = overlay.data.minWords || 4;
           const wordCount = rawVote.split(/\s+/).filter(Boolean).length;
-          
           if (wordCount < minWords) return;
-          
+
           const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
           const newMessage = {
             id: msgId,
@@ -510,20 +765,20 @@ io.on("connection", (socket) => {
             timestamp: Date.now(),
             sent: false
           };
-          
+
           if (!overlay.data.flux) overlay.data.flux = [];
           overlay.data.flux.push(newMessage);
-          
+
           if (overlay.data.flux.length > 50) {
             overlay.data.flux = overlay.data.flux.slice(-50);
           }
-          
+
           io.to(room).emit("overlay:state", {
             overlay: overlayName,
             state: "active",
             data: overlay.data
           });
-          
+
           console.log(`💬 [COMMENTAIRES] ${room} - Nouveau: "${rawVote.substring(0, 30)}..."`);
         }
       });
@@ -544,13 +799,12 @@ io.on("connection", (socket) => {
       if (q && q.type === "quiz" && q.correct) {
         const winners = r.history.filter(v => v.choice === q.correct);
         if (winners.length > 0) {
-          winners.sort((a,b) => a.time - b.time);
+          winners.sort((a, b) => a.time - b.time);
           winnerText = winners[0].user === "Anonyme" ? "Quelqu'un (Anonyme)" : winners[0].user;
         } else {
           winnerText = "Aucune bonne réponse";
         }
-      }
-      else if (q && q.type === "poll") {
+      } else if (q && q.type === "poll") {
         const stats = getVoteStats(r.history);
         const max = Math.max(stats.A, stats.B, stats.C, stats.D);
         const winnerKey = ["A","B","C","D"].find(k => stats[k] === max);
@@ -585,7 +839,7 @@ io.on("connection", (socket) => {
 
     const s = ensureOverlayState(p.room, p.overlay);
     s.state = "question";
-    s.data = { question, percents: {A:0, B:0, C:0, D:0} };
+    s.data = { question, percents: { A:0, B:0, C:0, D:0 } };
 
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "question", data: s.data });
   });
@@ -602,13 +856,15 @@ io.on("connection", (socket) => {
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
   });
 
+  // ============================================================
+  // HANDLERS ROUE LOTO
+  // ============================================================
+
   socket.on("roue:start_collect", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
     s.state = "collecting";
     s.data.participants = [];
-    
     console.log(`📝 [ROUE] ${p.room} - Démarrage collecte`);
-    
     io.to(p.room).emit("roue:start_collect");
   });
 
@@ -621,30 +877,30 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ✅ MODIFIÉ V5.12 : retour à "ready" après spin pour permettre relance
   socket.on("roue:spin", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
-    if (s.state === "ready") {
-      s.state = "spinning";
-      console.log(`🎡 [ROUE] ${p.room} - SPIN`);
-      io.to(p.room).emit("roue:spin");
-    }
+    if (s.state !== "ready") return;
+    s.state = "spinning";
+    console.log(`🎡 [ROUE] ${p.room} - SPIN`);
+    io.to(p.room).emit("roue:spin");
+    // Le retour à "ready" se fait via roue:winner_selected
   });
 
   socket.on("roue:reset", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
     s.state = "idle";
     s.data.participants = [];
-    
+    s.data.consecutifMode = false;
     console.log(`🔄 [ROUE] ${p.room} - Reset`);
-    
     io.to(p.room).emit("roue:reset");
   });
 
+  // Ancien handler (conservé pour compatibilité) — ajout via collecte
   socket.on("roue:add_participant", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
     if (s.state === "collecting") {
       if (!s.data.participants) s.data.participants = [];
-      
       const name = String(p.name || "").trim();
       if (name && !s.data.participants.includes(name)) {
         s.data.participants.push(name);
@@ -653,178 +909,343 @@ io.on("connection", (socket) => {
     }
   });
 
-  /* ===== TIMER/CHRONO HANDLERS ===== */
+  // ✅ NOUVEAU V5.12 : Ajout manuel sans contrainte d'état
+  socket.on("control:roue_add_participant_manual", (p) => {
+    const { room, name } = p;
+    if (!room || !name) return;
 
-  socket.on("control:timer_set_mode", (payload) => {
-    const { room, mode } = payload;
-    if (!room) return;
-    
-    const validMode = (mode === "chrono") ? "chrono" : "timer";
-    const s = ensureOverlayState(room, "timer_chrono");
-    
-    s.data.mode = validMode;
-    s.data.seconds = (validMode === "timer") ? 60 : 0;
-    
-    console.log(`🔄 [TIMER] ${room} - Mode: ${validMode}`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "set_mode",
-      mode: validMode
+    const s = ensureOverlayState(room, "roue_loto");
+    if (!s.data.participants) s.data.participants = [];
+
+    const cleanName = String(name).trim();
+    if (!cleanName) return;
+
+    const key = cleanName.toLowerCase();
+    const exists = s.data.participants.some(pp => {
+      const n = typeof pp === "string" ? pp : pp.name;
+      return n.toLowerCase() === key;
     });
+
+    if (!exists) {
+      s.data.participants.push({ name: cleanName, key });
+      console.log(`➕ [ROUE] ${room} - Ajout manuel: "${cleanName}" (total: ${s.data.participants.length})`);
+      io.to(room).emit("overlay:state", {
+        overlay: "roue_loto",
+        state: s.state,
+        data: s.data
+      });
+    }
   });
 
-  socket.on("control:timer_set_time", (payload) => {
-    const { room, seconds } = payload;
-    if (!room || !Number.isFinite(seconds)) return;
-    
-    const s = ensureOverlayState(room, "timer_chrono");
-    const clampedSeconds = Math.max(0, Math.min(seconds, 99 * 60 + 59));
-    
-    s.data.seconds = clampedSeconds;
-    
-    console.log(`⏱️ [TIMER] ${room} - Temps configuré: ${clampedSeconds}s`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "set_time",
-      seconds: clampedSeconds
-    });
-  });
+  // ✅ NOUVEAU V5.12 : Éditer un participant
+  socket.on("control:roue_edit_participant", (p) => {
+    const { room, index, oldName, newName } = p;
+    if (!room || !newName) return;
 
-  socket.on("control:timer_increment_time", (payload) => {
-    const { room, seconds } = payload;
-    if (!room || !Number.isFinite(seconds)) return;
-    
-    const s = ensureOverlayState(room, "timer_chrono");
-    const currentSeconds = s.data.seconds || 0;
-    const newSeconds = Math.max(0, Math.min(currentSeconds + seconds, 99 * 60 + 59));
-    
-    s.data.seconds = newSeconds;
-    
-    console.log(`➕➖ [TIMER] ${room} - Ajustement: ${seconds > 0 ? '+' : ''}${seconds}s → ${newSeconds}s`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "increment_time",
-      seconds: seconds
-    });
-  });
+    const s = ensureOverlayState(room, "roue_loto");
+    if (!s.data.participants) return;
 
-  socket.on("control:timer_start", (payload) => {
-    const { room } = payload;
-    if (!room) return;
-    
-    console.log(`▶️ [TIMER] ${room} - Start`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "start"
-    });
-  });
+    const cleanNew = String(newName).trim();
+    if (!cleanNew) return;
 
-  socket.on("control:timer_pause", (payload) => {
-    const { room } = payload;
-    if (!room) return;
-    
-    console.log(`⏸️ [TIMER] ${room} - Pause`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "pause"
-    });
-  });
+    let idx = (index !== undefined && index !== null) ? index : -1;
+    if (idx < 0 && oldName) {
+      idx = s.data.participants.findIndex(pp => {
+        const n = typeof pp === "string" ? pp : pp.name;
+        return n === oldName;
+      });
+    }
 
-  socket.on("control:timer_toggle_pause", (payload) => {
-    const { room } = payload;
-    if (!room) return;
-    
-    console.log(`⏯️ [TIMER] ${room} - Toggle pause`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "toggle_pause"
-    });
-  });
+    if (idx < 0 || idx >= s.data.participants.length) return;
 
-  socket.on("control:timer_reset", (payload) => {
-    const { room } = payload;
-    if (!room) return;
-    
-    console.log(`🔄 [TIMER] ${room} - Reset`);
-    
-    io.to(room).emit("control:timer_chrono", {
-      action: "reset"
-    });
-  });
+    const old = s.data.participants[idx];
+    const oldStr = typeof old === "string" ? old : old.name;
+    s.data.participants[idx] = { name: cleanNew, key: cleanNew.toLowerCase() };
 
-  // ============================================================
-  // HANDLERS COMMENTAIRES
-  // ============================================================
-  
-  socket.on("control:comment_to_queue", (payload) => {
-    const { room, messageId } = payload;
-    if (!room || !messageId) return;
-    
-    const s = ensureOverlayState(room, "commentaires");
-    const msgIndex = s.data.flux.findIndex(m => m.id === messageId);
-    if (msgIndex === -1) return;
-    
-    const message = s.data.flux[msgIndex];
-    message.sent = true;
-    
-    if (!s.data.queue) s.data.queue = [];
-    s.data.queue.push({ ...message, displayed: false });
-    
-    console.log(`→ [COMMENTAIRES] ${room} - Message ${messageId} → queue`);
-    
+    console.log(`✏️ [ROUE] ${room} - "${oldStr}" → "${cleanNew}"`);
+
     io.to(room).emit("overlay:state", {
-      overlay: "commentaires",
+      overlay: "roue_loto",
       state: s.state,
       data: s.data
     });
   });
 
+  // ✅ NOUVEAU V5.12 : Supprimer par index (prioritaire) ou par nom
+  socket.on("control:roue_remove_participant", (p) => {
+    const { room, name, index } = p;
+    if (!room) return;
+
+    const s = ensureOverlayState(room, "roue_loto");
+    if (!s.data.participants) return;
+
+    let idx = -1;
+    if (index !== undefined && index !== null && index >= 0 && index < s.data.participants.length) {
+      idx = index;
+    } else if (name) {
+      idx = s.data.participants.findIndex(pp => {
+        const n = typeof pp === "string" ? pp : pp.name;
+        return n === name;
+      });
+    }
+
+    if (idx === -1) return;
+
+    const removed = s.data.participants[idx];
+    s.data.participants.splice(idx, 1);
+    const removedName = typeof removed === "string" ? removed : removed.name;
+
+    console.log(`❌ [ROUE] ${room} - Participant supprimé: "${removedName}" (index ${idx})`);
+
+    io.to(room).emit("overlay:state", {
+      overlay: "roue_loto",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  // ✅ NOUVEAU V5.12 : Mode consécutif on/off
+  socket.on("roue:set_consecutif", (p) => {
+    const { room, enabled } = p;
+    if (!room) return;
+
+    const s = ensureOverlayState(room, "roue_loto");
+    s.data.consecutifMode = Boolean(enabled);
+
+    console.log(`🔁 [ROUE] ${room} - Mode consécutif: ${enabled ? "ON" : "OFF"}`);
+    // Pas d'émission nécessaire : la télécommande gère son état local,
+    // l'overlay le lira depuis overlay:state au prochain changement.
+  });
+
+  // ✅ NOUVEAU V5.12 : Gagnant sélectionné — retour à "ready" + mode consécutif
+  socket.on("roue:winner_selected", (p) => {
+    const { room, winnerName } = p;
+    if (!room || !winnerName) return;
+
+    const s = ensureOverlayState(room, "roue_loto");
+
+    // Retour à l'état "ready" pour permettre un prochain spin
+    s.state = "ready";
+
+    if (!s.data.consecutifMode) {
+      console.log(`🏆 [ROUE] ${room} - Gagnant: "${winnerName}" (mode consécutif OFF, liste inchangée)`);
+      return;
+    }
+
+    if (!s.data.participants) return;
+
+    // Supprimer le gagnant de la liste
+    const idx = s.data.participants.findIndex(pp => {
+      const n = typeof pp === "string" ? pp : pp.name;
+      return n === winnerName;
+    });
+
+    if (idx !== -1) {
+      s.data.participants.splice(idx, 1);
+      console.log(`🏆 [ROUE] ${room} - Mode consécutif: "${winnerName}" retiré (reste ${s.data.participants.length})`);
+
+      io.to(room).emit("overlay:state", {
+        overlay: "roue_loto",
+        state: s.state,
+        data: s.data
+      });
+    }
+  });
+
+  // ============================================================
+  // HANDLERS NUAGE DE MOTS
+  // ============================================================
+
+  // ✅ NOUVEAU V5.12 : +1 vote sur un mot existant (ou le crée)
+  socket.on("control:nuage_word_increment", (p) => {
+    const { room, word } = p;
+    if (!room || !word) return;
+
+    const s = ensureOverlayState(room, "nuage_de_mots");
+    if (!s.data.words) s.data.words = {};
+
+    const key = String(word).trim().toLowerCase();
+    if (!key) return;
+
+    s.data.words[key] = (s.data.words[key] || 0) + 1;
+
+    console.log(`+1 [NUAGE] ${room} - "${key}" → ${s.data.words[key]}`);
+
+    io.to(room).emit("overlay:state", {
+      overlay: "nuage_de_mots",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  // ✅ NOUVEAU V5.12 : Supprimer un mot du nuage
+  socket.on("control:nuage_remove_word", (p) => {
+    const { room, word } = p;
+    if (!room || !word) return;
+
+    const s = ensureOverlayState(room, "nuage_de_mots");
+    if (!s.data.words) return;
+
+    const key = String(word).trim().toLowerCase();
+    delete s.data.words[key];
+
+    console.log(`❌ [NUAGE] ${room} - Mot supprimé: "${key}"`);
+
+    io.to(room).emit("overlay:state", {
+      overlay: "nuage_de_mots",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  // ✅ NOUVEAU V5.12 : Vider tout le nuage
+  socket.on("control:nuage_clear_all", (p) => {
+    const { room } = p;
+    if (!room) return;
+
+    const s = ensureOverlayState(room, "nuage_de_mots");
+    s.data.words = {};
+
+    console.log(`🧹 [NUAGE] ${room} - Nuage vidé`);
+
+    io.to(room).emit("overlay:state", {
+      overlay: "nuage_de_mots",
+      state: s.state,
+      data: s.data
+    });
+  });
+
+  // ============================================================
+  // HANDLERS TIMER/CHRONO
+  // ============================================================
+
+  socket.on("control:timer_set_mode", (payload) => {
+    const { room, mode } = payload;
+    if (!room) return;
+
+    const validMode = (mode === "chrono") ? "chrono" : "timer";
+    const s = ensureOverlayState(room, "timer_chrono");
+
+    s.data.mode = validMode;
+    s.data.seconds = (validMode === "timer") ? 60 : 0;
+
+    console.log(`🔄 [TIMER] ${room} - Mode: ${validMode}`);
+
+    io.to(room).emit("control:timer_chrono", { action: "set_mode", mode: validMode });
+  });
+
+  socket.on("control:timer_set_time", (payload) => {
+    const { room, seconds } = payload;
+    if (!room || !Number.isFinite(seconds)) return;
+
+    const s = ensureOverlayState(room, "timer_chrono");
+    const clampedSeconds = Math.max(0, Math.min(seconds, 99 * 60 + 59));
+    s.data.seconds = clampedSeconds;
+
+    console.log(`⏱️ [TIMER] ${room} - Temps configuré: ${clampedSeconds}s`);
+
+    io.to(room).emit("control:timer_chrono", { action: "set_time", seconds: clampedSeconds });
+  });
+
+  socket.on("control:timer_increment_time", (payload) => {
+    const { room, seconds } = payload;
+    if (!room || !Number.isFinite(seconds)) return;
+
+    const s = ensureOverlayState(room, "timer_chrono");
+    const currentSeconds = s.data.seconds || 0;
+    const newSeconds = Math.max(0, Math.min(currentSeconds + seconds, 99 * 60 + 59));
+    s.data.seconds = newSeconds;
+
+    console.log(`➕➖ [TIMER] ${room} - Ajustement: ${seconds > 0 ? '+' : ''}${seconds}s → ${newSeconds}s`);
+
+    io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds });
+  });
+
+  socket.on("control:timer_start", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    console.log(`▶️ [TIMER] ${room} - Start`);
+    io.to(room).emit("control:timer_chrono", { action: "start" });
+  });
+
+  socket.on("control:timer_pause", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    console.log(`⏸️ [TIMER] ${room} - Pause`);
+    io.to(room).emit("control:timer_chrono", { action: "pause" });
+  });
+
+  socket.on("control:timer_toggle_pause", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    console.log(`⏯️ [TIMER] ${room} - Toggle pause`);
+    io.to(room).emit("control:timer_chrono", { action: "toggle_pause" });
+  });
+
+  socket.on("control:timer_reset", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    console.log(`🔄 [TIMER] ${room} - Reset`);
+    io.to(room).emit("control:timer_chrono", { action: "reset" });
+  });
+
+  // ============================================================
+  // HANDLERS COMMENTAIRES
+  // ============================================================
+
+  socket.on("control:comment_to_queue", (payload) => {
+    const { room, messageId } = payload;
+    if (!room || !messageId) return;
+
+    const s = ensureOverlayState(room, "commentaires");
+    const msgIndex = s.data.flux.findIndex(m => m.id === messageId);
+    if (msgIndex === -1) return;
+
+    const message = s.data.flux[msgIndex];
+    message.sent = true;
+
+    if (!s.data.queue) s.data.queue = [];
+    s.data.queue.push({ ...message, displayed: false });
+
+    console.log(`→ [COMMENTAIRES] ${room} - Message ${messageId} → queue`);
+
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: s.state, data: s.data });
+  });
+
   socket.on("control:comment_show", (payload) => {
     const { room, messageId } = payload;
     if (!room || !messageId) return;
-    
+
     const s = ensureOverlayState(room, "commentaires");
     const message = s.data.queue.find(m => m.id === messageId);
     if (!message) return;
-    
+
     message.displayed = true;
-    s.data.current = {
-      id: message.id,
-      author: message.author,
-      text: message.text
-    };
-    
+    s.data.current = { id: message.id, author: message.author, text: message.text };
+
     console.log(`👁️ [COMMENTAIRES] ${room} - Affichage: "${message.text.substring(0, 30)}..."`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "commentaires",
-      state: "active",
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: s.data });
   });
 
   socket.on("control:comment_hide", (payload) => {
     const { room } = payload;
     if (!room) return;
-    
+
     const s = ensureOverlayState(room, "commentaires");
     s.data.current = null;
-    
+
     console.log(`🙈 [COMMENTAIRES] ${room} - Commentaire masqué`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "commentaires",
-      state: "active",
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: s.data });
   });
 
   socket.on("control:comment_delete", (payload) => {
     const { room, column, messageId } = payload;
     if (!room || !column || !messageId) return;
-    
+
     const s = ensureOverlayState(room, "commentaires");
-    
+
     if (column === "flux") {
       s.data.flux = s.data.flux.filter(m => m.id !== messageId);
     } else if (column === "queue") {
@@ -833,91 +1254,72 @@ io.on("connection", (socket) => {
         s.data.current = null;
       }
     }
-    
+
     console.log(`❌ [COMMENTAIRES] ${room} - Message ${messageId} supprimé (${column})`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "commentaires",
-      state: s.state,
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: s.state, data: s.data });
   });
 
   socket.on("control:comment_reset_flux", (payload) => {
     const { room } = payload;
     if (!room) return;
-    
+
     const s = ensureOverlayState(room, "commentaires");
     s.data.flux = [];
-    
+
     console.log(`🧹 [COMMENTAIRES] ${room} - Flux nettoyé`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "commentaires",
-      state: s.state,
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: s.state, data: s.data });
   });
 
   socket.on("control:comment_reset_queue", (payload) => {
     const { room } = payload;
     if (!room) return;
-    
+
     const s = ensureOverlayState(room, "commentaires");
     s.data.queue = [];
     s.data.current = null;
-    
+
     console.log(`🧹 [COMMENTAIRES] ${room} - Queue vidée`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "commentaires",
-      state: s.state,
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: s.state, data: s.data });
   });
 
   // ============================================================
   // HANDLERS MATCH ÉQUIPES
   // ============================================================
-  
+
   socket.on("control:match_adjust_score", (payload) => {
     const { room, team, delta } = payload;
     if (!room || !team || delta === undefined) return;
-    
+
     const s = ensureOverlayState(room, "match_equipes");
-    
+
     if (team === 'A') {
       s.data.teamA.score = Math.max(0, s.data.teamA.score + delta);
     } else if (team === 'B') {
       s.data.teamB.score = Math.max(0, s.data.teamB.score + delta);
     }
-    
+
     console.log(`📊 [MATCH] ${room} - ${team} ${delta > 0 ? '+' : ''}${delta} → ${team === 'A' ? s.data.teamA.score : s.data.teamB.score}`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "match_equipes",
-      state: s.state,
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
   });
 
   socket.on("control:match_reset", (payload) => {
     const { room } = payload;
     if (!room) return;
-    
+
     const s = ensureOverlayState(room, "match_equipes");
     s.data.teamA.score = 0;
     s.data.teamB.score = 0;
-    
+
     console.log(`🔄 [MATCH] ${room} - Reset 0-0`);
-    
-    io.to(room).emit("overlay:state", {
-      overlay: "match_equipes",
-      state: s.state,
-      data: s.data
-    });
+
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
   });
+
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.10 Complete Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.15 Online on ${PORT}`));
