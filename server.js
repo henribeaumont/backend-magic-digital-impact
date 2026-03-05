@@ -38,7 +38,7 @@ const ROOMS = Object.create(null);
 
 function getRoom(id) {
   if (!ROOMS[id]) {
-    ROOMS[id] = { overlays: {}, history: [] };
+    ROOMS[id] = { overlays: {}, history: [], presence: {} };
   }
   return ROOMS[id];
 }
@@ -538,7 +538,14 @@ app.post("/api/client/delete-question", requireClientAuth, async (req, res) => {
 io.on("connection", (socket) => {
   const socketOverlays = [];
 
-  socket.on("rejoindre_salle", (roomId) => socket.join(roomId));
+  socket.on("rejoindre_salle", (roomId) => {
+    socket.join(roomId);
+    // Renvoyer l'état de présence actuel à ce socket (télécommande qui se reconnecte)
+    const r = getRoom(roomId);
+    Object.entries(r.presence || {}).forEach(([overlay, state]) => {
+      socket.emit("overlay:presence", { overlay, ...state });
+    });
+  });
 
   // ============================================================
   // PRÉSENCE OVERLAYS — V5.15
@@ -550,6 +557,9 @@ io.on("connection", (socket) => {
     if (!socketOverlays.find(o => o.room === room && o.overlay === overlay)) {
       socketOverlays.push({ room, overlay });
     }
+    const r = getRoom(room);
+    if (!r.presence[overlay]) r.presence[overlay] = { online: false, displaying: false };
+    r.presence[overlay].online = true;
     console.log(`🟢 [PRÉSENCE] ${room} - ${overlay} : en ligne`);
     io.to(room).emit("overlay:presence", { overlay, online: true });
   });
@@ -557,6 +567,8 @@ io.on("connection", (socket) => {
   socket.on("overlay:offline", (p) => {
     const { room, overlay } = p;
     if (!room || !overlay) return;
+    const r = getRoom(room);
+    if (r.presence[overlay]) { r.presence[overlay].online = false; r.presence[overlay].displaying = false; }
     console.log(`🔴 [PRÉSENCE] ${room} - ${overlay} : hors ligne (explicite)`);
     io.to(room).emit("overlay:presence", { overlay, online: false, displaying: false });
   });
@@ -564,12 +576,17 @@ io.on("connection", (socket) => {
   socket.on("overlay:presence_update", (p) => {
     const { room, overlay, displaying } = p;
     if (!room || !overlay) return;
+    const r = getRoom(room);
+    if (!r.presence[overlay]) r.presence[overlay] = { online: false, displaying: false };
+    r.presence[overlay].displaying = Boolean(displaying);
     console.log(`📺 [PRÉSENCE] ${room} - ${overlay} : affichage = ${displaying}`);
     io.to(room).emit("overlay:presence", { overlay, displaying: Boolean(displaying) });
   });
 
   socket.on("disconnect", () => {
     for (const { room, overlay } of socketOverlays) {
+      const r = getRoom(room);
+      if (r.presence[overlay]) { r.presence[overlay].online = false; r.presence[overlay].displaying = false; }
       console.log(`🔴 [PRÉSENCE] ${room} - ${overlay} : hors ligne (disconnect)`);
       io.to(room).emit("overlay:presence", { overlay, online: false, displaying: false });
     }
