@@ -576,10 +576,11 @@ io.on("connection", (socket) => {
   });
 
   socket.on("overlay:join", async (p) => {
-    if (!supabaseEnabled) return;
-    const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
-    if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", { reason: "auth" });
-    if (client.expires_at && new Date(client.expires_at) < new Date()) return socket.emit("overlay:forbidden", { reason: "expired" });
+    if (supabaseEnabled) {
+      const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
+      if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", { reason: "auth" });
+      if (client.expires_at && new Date(client.expires_at) < new Date()) return socket.emit("overlay:forbidden", { reason: "expired" });
+    }
     socket.join(p.room);
     const s = ensureOverlayState(p.room, p.overlay);
     if (p.overlay === "quiz_ou_sondage") {
