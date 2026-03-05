@@ -593,12 +593,20 @@ io.on("connection", (socket) => {
   });
 
   socket.on("overlay:join", async (p) => {
+    console.log(`🔌 [overlay:join] room=${p.room} overlay=${p.overlay} key=${p.key}`);
     if (supabaseEnabled) {
       const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
-      if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", { reason: "auth" });
-      if (client.expires_at && new Date(client.expires_at) < new Date()) return socket.emit("overlay:forbidden", { reason: "expired" });
+      if (!client || !client.active || client.room_key !== p.key) {
+        console.log(`❌ [overlay:join] REFUSÉ — room=${p.room} overlay=${p.overlay}`);
+        return socket.emit("overlay:forbidden", { reason: "auth" });
+      }
+      if (client.expires_at && new Date(client.expires_at) < new Date()) {
+        console.log(`❌ [overlay:join] EXPIRÉ — room=${p.room}`);
+        return socket.emit("overlay:forbidden", { reason: "expired" });
+      }
     }
     socket.join(p.room);
+    console.log(`✅ [overlay:join] ACCEPTÉ — room=${p.room} overlay=${p.overlay}`);
     const s = ensureOverlayState(p.room, p.overlay);
     if (p.overlay === "quiz_ou_sondage") {
       const r = getRoom(p.room);
