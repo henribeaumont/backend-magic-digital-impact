@@ -932,6 +932,18 @@ io.on("connection", (socket) => {
     io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: s.state, data: s.data });
   });
 
+  socket.on("control:nuage_word_decrement", (p) => {
+    const { room, word } = p;
+    if (!room || !word) return;
+    const s = ensureOverlayState(room, "nuage_de_mots");
+    if (!s.data.words) return;
+    const key = String(word).trim().toLowerCase();
+    if (!key || !s.data.words[key]) return;
+    s.data.words[key] = Math.max(1, s.data.words[key] - 1);
+    console.log(`-1 [NUAGE] ${room} - "${key}" → ${s.data.words[key]}`);
+    io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: s.state, data: s.data });
+  });
+
   socket.on("control:nuage_remove_word", (p) => {
     const { room, word } = p;
     if (!room || !word) return;
