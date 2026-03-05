@@ -770,6 +770,10 @@ io.on("connection", (socket) => {
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "idle", data: {} });
   });
 
+  socket.on("control:fire_confetti", (p) => {
+    io.to(p.room).emit("declencher_explosion");
+  });
+
   // ============================================================
   // HANDLERS ROUE LOTO
   // ============================================================
