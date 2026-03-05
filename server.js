@@ -481,6 +481,131 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  if (action === "match_off") {
+    const s = ensureOverlayState(room, "match_equipes");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Match OFF`);
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "timer_on") {
+    const s = ensureOverlayState(room, "timer_chrono");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Timer ON`);
+    io.to(room).emit("overlay:state", { overlay: "timer_chrono", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "timer_off") {
+    const s = ensureOverlayState(room, "timer_chrono");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Timer OFF`);
+    io.to(room).emit("overlay:state", { overlay: "timer_chrono", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "mot_magique_on") {
+    const s = ensureOverlayState(room, "mot_magique");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Mot Magique ON`);
+    io.to(room).emit("overlay:state", { overlay: "mot_magique", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "mot_magique_off") {
+    const s = ensureOverlayState(room, "mot_magique");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Mot Magique OFF`);
+    io.to(room).emit("overlay:state", { overlay: "mot_magique", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "tug_of_war_on") {
+    const s = ensureOverlayState(room, "tug_of_war");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Tug of War ON`);
+    io.to(room).emit("overlay:state", { overlay: "tug_of_war", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "tug_of_war_off") {
+    const s = ensureOverlayState(room, "tug_of_war");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Tug of War OFF`);
+    io.to(room).emit("overlay:state", { overlay: "tug_of_war", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "decompte_bonhomme_on") {
+    const s = ensureOverlayState(room, "decompte_bonhomme");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Décompte Bonhomme ON`);
+    io.to(room).emit("overlay:state", { overlay: "decompte_bonhomme", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "decompte_bonhomme_off") {
+    const s = ensureOverlayState(room, "decompte_bonhomme");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Décompte Bonhomme OFF`);
+    io.to(room).emit("overlay:state", { overlay: "decompte_bonhomme", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "decompte_poker_on") {
+    const s = ensureOverlayState(room, "decompte_poker");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Décompte Poker ON`);
+    io.to(room).emit("overlay:state", { overlay: "decompte_poker", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "decompte_poker_off") {
+    const s = ensureOverlayState(room, "decompte_poker");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Décompte Poker OFF`);
+    io.to(room).emit("overlay:state", { overlay: "decompte_poker", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "emojis_tornado_on") {
+    const s = ensureOverlayState(room, "emojis_tornado");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Tornade Emojis ON`);
+    io.to(room).emit("overlay:state", { overlay: "emojis_tornado", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "emojis_tornado_off") {
+    const s = ensureOverlayState(room, "emojis_tornado");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Tornade Emojis OFF`);
+    io.to(room).emit("overlay:state", { overlay: "emojis_tornado", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "confettis_on") {
+    const s = ensureOverlayState(room, "confettis");
+    s.state = "active";
+    s.data.activatedAt = Date.now();
+    console.log(`🎮 [API] ${room} - Confettis ON`);
+    io.to(room).emit("overlay:state", { overlay: "confettis", state: "active", data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "confettis_off") {
+    const s = ensureOverlayState(room, "confettis");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Confettis OFF`);
+    io.to(room).emit("overlay:state", { overlay: "confettis", state: "idle", data: {} });
+    return res.json({ ok: true, action });
+  }
+  if (action === "confettis_explosion") {
+    console.log(`🎮 [API] ${room} - Confettis explosion`);
+    io.to(room).emit("declencher_explosion");
+    return res.json({ ok: true, action });
+  }
+
   res.status(400).json({ ok: false, error: "unknown_action", action });
 });
 
