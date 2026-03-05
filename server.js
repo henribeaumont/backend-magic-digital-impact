@@ -127,6 +127,7 @@ async function requireClientAuth(req, res, next) {
   if (!client) return res.status(404).json({ ok: false, error: "Client inconnu" });
   if (client.room_key !== roomKey) return res.status(403).json({ ok: false, error: "Mauvaise clé" });
   if (!client.active) return res.status(403).json({ ok: false, error: "Compte désactivé" });
+  if (client.expires_at && new Date(client.expires_at) < new Date()) return res.status(403).json({ ok: false, error: "Accès expiré" });
   req.client = client;
   next();
 }
@@ -578,6 +579,7 @@ io.on("connection", (socket) => {
     if (!supabaseEnabled) return;
     const { data: client } = await supabase.from("clients").select("*").eq("room_id", p.room).maybeSingle();
     if (!client || !client.active || client.room_key !== p.key) return socket.emit("overlay:forbidden", { reason: "auth" });
+    if (client.expires_at && new Date(client.expires_at) < new Date()) return socket.emit("overlay:forbidden", { reason: "expired" });
     socket.join(p.room);
     const s = ensureOverlayState(p.room, p.overlay);
     if (p.overlay === "quiz_ou_sondage") {
