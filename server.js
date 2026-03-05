@@ -724,16 +724,19 @@ io.on("connection", (socket) => {
 
   // NOTE CLIENT : la télécommande doit inclure { room, key, overlay, question_key }
   socket.on("control:load_question", async (p) => {
-    if (!supabaseEnabled) return;
+    console.log(`🎮 [load_question] room=${p.room} key=${p.key} question_key=${p.question_key} overlay=${p.overlay}`);
+    if (!supabaseEnabled) { console.log("❌ [load_question] Supabase désactivé"); return; }
     const { data: clientAuth } = await supabase
       .from("clients").select("room_key, active").eq("room_id", p.room).maybeSingle();
-    if (!clientAuth || !clientAuth.active || clientAuth.room_key !== p.key) return;
+    if (!clientAuth) { console.log("❌ [load_question] client inconnu pour room:", p.room); return; }
+    if (!clientAuth.active) { console.log("❌ [load_question] client inactif"); return; }
+    if (clientAuth.room_key !== p.key) { console.log("❌ [load_question] mauvaise clé"); return; }
     const r = getRoom(p.room);
     r.history = [];
     const { data: q } = await supabase
       .from("questions").select("*")
       .eq("room_id", p.room).eq("question_key", p.question_key).maybeSingle();
-    if (!q) return;
+    if (!q) { console.log(`❌ [load_question] question introuvable: ${p.question_key} dans room ${p.room}`); return; }
     const question = {
       id: q.question_key, type: q.type, prompt: q.prompt,
       options: { A: q.option_a||"", B: q.option_b||"", C: q.option_c||"", D: q.option_d||"" },
@@ -742,6 +745,8 @@ io.on("connection", (socket) => {
     const s = ensureOverlayState(p.room, p.overlay);
     s.state = "question";
     s.data = { question, percents: { A:0, B:0, C:0, D:0 } };
+    const socketsInRoom = await io.in(p.room).allSockets();
+    console.log(`✅ [load_question] Émission overlay:state → room ${p.room} (${socketsInRoom.size} sockets)`);
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: "question", data: s.data });
   });
 
