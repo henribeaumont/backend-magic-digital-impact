@@ -126,6 +126,7 @@ async function requireClientAuth(req, res, next) {
   const { data: client } = await supabase.from("clients").select("*").eq("room_id", roomId).limit(1).maybeSingle();
   if (!client) return res.status(404).json({ ok: false, error: "Client inconnu" });
   if (client.room_key !== roomKey) return res.status(403).json({ ok: false, error: "Mauvaise clé" });
+  if (!client.active) return res.status(403).json({ ok: false, error: "Compte désactivé" });
   req.client = client;
   next();
 }
@@ -151,7 +152,7 @@ app.get("/health", (req, res) => {
 
 app.get("/", (req, res) => res.send("MDI Server V5.16 Online"));
 
-app.get("/debug/questions", async (req, res) => {
+app.get("/debug/questions", requireAdmin, async (req, res) => {
   const room = String(req.query.room || "").trim();
   if (!room || !supabaseEnabled) return res.json({ ok: false, error: "no_room" });
   const { data } = await supabase.from("questions").select("*").eq("room_id", room).order("order_index");
@@ -504,7 +505,9 @@ app.post("/api/admin/question", requireAdmin, async (req, res) => {
 });
 
 app.post("/api/admin/delete-question", requireAdmin, async (req, res) => {
-  const { error } = await supabase.from("questions").delete().match(req.body);
+  const { room_id, question_key } = req.body;
+  if (!room_id || !question_key) return res.status(400).json({ ok: false, error: "room_id et question_key requis" });
+  const { error } = await supabase.from("questions").delete().match({ room_id, question_key });
   res.json({ ok: !error, error: error?.message });
 });
 
@@ -699,7 +702,12 @@ io.on("connection", (socket) => {
     io.to(p.room).emit("overlay:state", { overlay: p.overlay, state: p.state, data: s.data });
   });
 
+  // NOTE CLIENT : la télécommande doit inclure { room, key, overlay, question_key }
   socket.on("control:load_question", async (p) => {
+    if (!supabaseEnabled) return;
+    const { data: clientAuth } = await supabase
+      .from("clients").select("room_key, active").eq("room_id", p.room).maybeSingle();
+    if (!clientAuth || !clientAuth.active || clientAuth.room_key !== p.key) return;
     const r = getRoom(p.room);
     r.history = [];
     const { data: q } = await supabase
