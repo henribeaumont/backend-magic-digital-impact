@@ -220,33 +220,52 @@ app.post("/api/control", async (req, res) => {
   if (action === "timer_preset") {
     const seconds = parseInt(payload?.seconds, 10);
     if (Number.isFinite(seconds)) {
-      io.to(room).emit("control:timer_set_time", { room, seconds });
+      const s = ensureOverlayState(room, "timer_chrono");
+      s.data.seconds = seconds;
+      io.to(room).emit("control:timer_chrono", { action: "set_time", seconds });
       return res.json({ ok: true, action: "timer_preset", seconds });
     }
   }
-  if (action === "timer_add_10min") { io.to(room).emit("control:timer_increment_time", { room, seconds: 600 });  return res.json({ ok: true, action }); }
-  if (action === "timer_add_1min")  { io.to(room).emit("control:timer_increment_time", { room, seconds: 60 });   return res.json({ ok: true, action }); }
-  if (action === "timer_add_10sec") { io.to(room).emit("control:timer_increment_time", { room, seconds: 10 });   return res.json({ ok: true, action }); }
-  if (action === "timer_add_1sec")  { io.to(room).emit("control:timer_increment_time", { room, seconds: 1 });    return res.json({ ok: true, action }); }
-  if (action === "timer_sub_10min") { io.to(room).emit("control:timer_increment_time", { room, seconds: -600 }); return res.json({ ok: true, action }); }
-  if (action === "timer_sub_1min")  { io.to(room).emit("control:timer_increment_time", { room, seconds: -60 });  return res.json({ ok: true, action }); }
-  if (action === "timer_sub_10sec") { io.to(room).emit("control:timer_increment_time", { room, seconds: -10 });  return res.json({ ok: true, action }); }
-  if (action === "timer_sub_1sec")  { io.to(room).emit("control:timer_increment_time", { room, seconds: -1 });   return res.json({ ok: true, action }); }
-  if (action === "timer_start")        { io.to(room).emit("control:timer_start", { room });        return res.json({ ok: true, action }); }
-  if (action === "timer_pause")        { io.to(room).emit("control:timer_pause", { room });        return res.json({ ok: true, action }); }
-  if (action === "timer_reset")        { io.to(room).emit("control:timer_reset", { room });        return res.json({ ok: true, action }); }
-  if (action === "timer_toggle_pause") { io.to(room).emit("control:timer_toggle_pause", { room }); return res.json({ ok: true, action }); }
-  if (action === "timer_mode_chrono")  { io.to(room).emit("control:timer_set_mode", { room, mode: "chrono" }); return res.json({ ok: true, action }); }
-  if (action === "timer_mode_timer")   { io.to(room).emit("control:timer_set_mode", { room, mode: "timer" });  return res.json({ ok: true, action }); }
+  if (action === "timer_add_10min") { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:  600 }); return res.json({ ok: true, action }); }
+  if (action === "timer_add_1min")  { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:   60 }); return res.json({ ok: true, action }); }
+  if (action === "timer_add_10sec") { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:   10 }); return res.json({ ok: true, action }); }
+  if (action === "timer_add_1sec")  { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:    1 }); return res.json({ ok: true, action }); }
+  if (action === "timer_sub_10min") { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds: -600 }); return res.json({ ok: true, action }); }
+  if (action === "timer_sub_1min")  { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:  -60 }); return res.json({ ok: true, action }); }
+  if (action === "timer_sub_10sec") { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:  -10 }); return res.json({ ok: true, action }); }
+  if (action === "timer_sub_1sec")  { io.to(room).emit("control:timer_chrono", { action: "increment_time", seconds:   -1 }); return res.json({ ok: true, action }); }
+  if (action === "timer_start")        { io.to(room).emit("control:timer_chrono", { action: "start" });        return res.json({ ok: true, action }); }
+  if (action === "timer_pause")        { io.to(room).emit("control:timer_chrono", { action: "pause" });        return res.json({ ok: true, action }); }
+  if (action === "timer_reset")        { io.to(room).emit("control:timer_chrono", { action: "reset" });        return res.json({ ok: true, action }); }
+  if (action === "timer_toggle_pause") { io.to(room).emit("control:timer_chrono", { action: "toggle_pause" }); return res.json({ ok: true, action }); }
+  if (action === "timer_mode_chrono") {
+    const s = ensureOverlayState(room, "timer_chrono"); s.data.mode = "chrono";
+    io.to(room).emit("control:timer_chrono", { action: "set_mode", mode: "chrono" }); return res.json({ ok: true, action });
+  }
+  if (action === "timer_mode_timer") {
+    const s = ensureOverlayState(room, "timer_chrono"); s.data.mode = "timer";
+    io.to(room).emit("control:timer_chrono", { action: "set_mode", mode: "timer" }); return res.json({ ok: true, action });
+  }
 
   if (action === "comment_show") {
     const messageId = payload?.messageId;
     if (messageId) {
-      io.to(room).emit("control:comment_show", { room, messageId });
+      const s = ensureOverlayState(room, "commentaires");
+      if (!s.data.queue) s.data.queue = [];
+      const msg = s.data.queue.find(m => m.id === messageId);
+      if (!msg) return res.status(404).json({ ok: false, error: "message_not_found", messageId });
+      msg.displayed = true;
+      s.data.current = { id: msg.id, author: msg.author, text: msg.text };
+      io.to(room).emit("overlay:state", { overlay: "commentaires", state: s.state, data: s.data });
       return res.json({ ok: true, action, messageId });
     }
   }
-  if (action === "comment_hide") { io.to(room).emit("control:comment_hide", { room }); return res.json({ ok: true, action }); }
+  if (action === "comment_hide") {
+    const s = ensureOverlayState(room, "commentaires");
+    s.data.current = null;
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: s.state, data: s.data });
+    return res.json({ ok: true, action });
+  }
 
   if (action === "commentaires_on") {
     const s = ensureOverlayState(room, "commentaires");
@@ -277,6 +296,9 @@ app.post("/api/control", async (req, res) => {
     if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
     if (team === 'A') s.data.teamA.score = Math.max(0, s.data.teamA.score + delta);
     else              s.data.teamB.score = Math.max(0, s.data.teamB.score + delta);
+    // Auto-activation : si l'overlay est idle (pas de match_on préalable depuis la télécommande),
+    // on active automatiquement pour que le Stream Deck puisse piloter sans pré-requis.
+    if (s.state === "idle") s.state = "active";
     console.log(`📊 [MATCH] ${room} - ${team} ${delta > 0 ? '+' : ''}${delta} → ${team === 'A' ? s.data.teamA.score : s.data.teamB.score}`);
     io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
     return res.json({ ok: true, action });
@@ -404,6 +426,7 @@ app.post("/api/control", async (req, res) => {
     const s = ensureOverlayState(room, "roue_loto");
     s.data.consecutifMode = true;
     console.log(`🎮 [API] ${room} - Roue mode consécutif ON`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
     return res.json({ ok: true, action });
   }
 
@@ -411,6 +434,7 @@ app.post("/api/control", async (req, res) => {
     const s = ensureOverlayState(room, "roue_loto");
     s.data.consecutifMode = false;
     console.log(`🎮 [API] ${room} - Roue mode consécutif OFF`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
     return res.json({ ok: true, action });
   }
 
@@ -621,6 +645,21 @@ app.post("/api/control", async (req, res) => {
   if (action === "confettis_explosion") {
     console.log(`🎮 [API] ${room} - Confettis explosion`);
     io.to(room).emit("declencher_explosion");
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "quiz_on") {
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    if (s.state !== "idle") {
+      io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: s.state, data: s.data });
+    }
+    return res.json({ ok: true, action, currentState: s.state });
+  }
+  if (action === "quiz_off") {
+    const s = ensureOverlayState(room, "quiz_ou_sondage");
+    s.state = "idle";
+    console.log(`🎮 [API] ${room} - Quiz OFF`);
+    io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "idle", data: {} });
     return res.json({ ok: true, action });
   }
 
