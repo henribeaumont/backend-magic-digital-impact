@@ -268,11 +268,29 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action });
   }
 
-  if (action === "match_team_a_increment") { io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: 1 });  return res.json({ ok: true, action }); }
-  if (action === "match_team_a_decrement") { io.to(room).emit("control:match_adjust_score", { room, team: 'A', delta: -1 }); return res.json({ ok: true, action }); }
-  if (action === "match_team_b_increment") { io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: 1 });  return res.json({ ok: true, action }); }
-  if (action === "match_team_b_decrement") { io.to(room).emit("control:match_adjust_score", { room, team: 'B', delta: -1 }); return res.json({ ok: true, action }); }
-  if (action === "match_reset")            { io.to(room).emit("control:match_reset", { room }); return res.json({ ok: true, action }); }
+  if (action === "match_team_a_increment" || action === "match_team_a_decrement" ||
+      action === "match_team_b_increment" || action === "match_team_b_decrement") {
+    const team  = action.includes("_a_") ? 'A' : 'B';
+    const delta = action.includes("_increment") ? 1 : -1;
+    const s = ensureOverlayState(room, "match_equipes");
+    if (!s.data.teamA) s.data.teamA = { name: "ÉQUIPE A", score: 0 };
+    if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
+    if (team === 'A') s.data.teamA.score = Math.max(0, s.data.teamA.score + delta);
+    else              s.data.teamB.score = Math.max(0, s.data.teamB.score + delta);
+    console.log(`📊 [MATCH] ${room} - ${team} ${delta > 0 ? '+' : ''}${delta} → ${team === 'A' ? s.data.teamA.score : s.data.teamB.score}`);
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
+    return res.json({ ok: true, action });
+  }
+  if (action === "match_reset") {
+    const s = ensureOverlayState(room, "match_equipes");
+    if (!s.data.teamA) s.data.teamA = { name: "ÉQUIPE A", score: 0 };
+    if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
+    s.data.teamA.score = 0;
+    s.data.teamB.score = 0;
+    console.log(`🔄 [MATCH] ${room} - Reset 0-0`);
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
+    return res.json({ ok: true, action });
+  }
 
   if (action === "match_on") {
     const s = ensureOverlayState(room, "match_equipes");
