@@ -1,8 +1,10 @@
 // ============================================================
-// MDI SERVER V5.16 - COMPLET
-// ✅ Tout V5.15 préservé (ZÉRO RÉGRESSION)
-// ✅ FIX NUAGE : longueur minimum 2 caractères (filtre "x", "❌", etc.)
-// ✅ FIX NUAGE : throttle 1s sur overlay:state pour éviter saturation
+// MDI SERVER V5.17 - COMPLET
+// ✅ Tout V5.16 préservé (ZÉRO RÉGRESSION)
+// ✅ ROUE : machine à états deux étapes (winner → ready → spinning)
+// ✅ ROUE : overlay:state systématiquement émis pour sync remote ↔ Stream Deck
+// ✅ ROUE : mode consécutif broadcaste via overlay:state
+// ✅ ROUE : winnerName stocké dans s.data pour restauration d'état
 // ============================================================
 
 const express = require("express");
@@ -386,8 +388,10 @@ app.post("/api/control", async (req, res) => {
     const s = ensureOverlayState(room, "roue_loto");
     s.state = "collecting";
     s.data.participants = [];
+    s.data.winnerName = null;
     console.log(`🎮 [API] ${room} - Roue start collect`);
     io.to(room).emit("roue:start_collect");
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
     return res.json({ ok: true, action });
   }
 
@@ -397,12 +401,29 @@ app.post("/api/control", async (req, res) => {
       s.state = "ready";
       console.log(`🎮 [API] ${room} - Roue stop collect`);
       io.to(room).emit("roue:stop_collect");
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
     }
     return res.json({ ok: true, action });
   }
 
   if (action === "roue_spin") {
     const s = ensureOverlayState(room, "roue_loto");
+    // Étape 1 : winner → ready (retrait gagnant si mode consécutif)
+    if (s.state === "winner") {
+      if (s.data.consecutifMode && s.data.winnerName && s.data.participants) {
+        const idx = s.data.participants.findIndex(pp => {
+          const n = typeof pp === "string" ? pp : pp.name;
+          return n === s.data.winnerName;
+        });
+        if (idx !== -1) s.data.participants.splice(idx, 1);
+      }
+      s.state = "ready";
+      s.data.winnerName = null;
+      console.log(`🎮 [API] ${room} - Roue: winner → ready`);
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
+      return res.json({ ok: true, action, transitioned: "winner_to_ready" });
+    }
+    // Étape 2 : ready → spinning
     if (s.state !== "ready") {
       return res.status(409).json({ ok: false, error: "roue_not_ready", state: s.state });
     }
@@ -417,6 +438,7 @@ app.post("/api/control", async (req, res) => {
     s.state = "idle";
     s.data.participants = [];
     s.data.consecutifMode = false;
+    s.data.winnerName = null;
     console.log(`🎮 [API] ${room} - Roue reset`);
     io.to(room).emit("roue:reset");
     return res.json({ ok: true, action });
@@ -964,8 +986,10 @@ io.on("connection", (socket) => {
     const s = ensureOverlayState(p.room, "roue_loto");
     s.state = "collecting";
     s.data.participants = [];
+    s.data.winnerName = null;
     console.log(`📝 [ROUE] ${p.room} - Démarrage collecte`);
     io.to(p.room).emit("roue:start_collect");
+    io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
   });
 
   socket.on("roue:stop_collect", (p) => {
@@ -974,11 +998,28 @@ io.on("connection", (socket) => {
       s.state = "ready";
       console.log(`🔒 [ROUE] ${p.room} - Fermeture collecte`);
       io.to(p.room).emit("roue:stop_collect");
+      io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
     }
   });
 
   socket.on("roue:spin", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
+    // Étape 1 : winner → ready (retrait gagnant si mode consécutif)
+    if (s.state === "winner") {
+      if (s.data.consecutifMode && s.data.winnerName && s.data.participants) {
+        const idx = s.data.participants.findIndex(pp => {
+          const n = typeof pp === "string" ? pp : pp.name;
+          return n === s.data.winnerName;
+        });
+        if (idx !== -1) s.data.participants.splice(idx, 1);
+      }
+      s.state = "ready";
+      s.data.winnerName = null;
+      console.log(`🎡 [ROUE] ${p.room} - winner → ready`);
+      io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
+      return;
+    }
+    // Étape 2 : ready → spinning
     if (s.state !== "ready") return;
     s.state = "spinning";
     console.log(`🎡 [ROUE] ${p.room} - SPIN`);
@@ -990,6 +1031,7 @@ io.on("connection", (socket) => {
     s.state = "idle";
     s.data.participants = [];
     s.data.consecutifMode = false;
+    s.data.winnerName = null;
     console.log(`🔄 [ROUE] ${p.room} - Reset`);
     io.to(p.room).emit("roue:reset");
   });
@@ -1075,27 +1117,17 @@ io.on("connection", (socket) => {
     const s = ensureOverlayState(room, "roue_loto");
     s.data.consecutifMode = Boolean(enabled);
     console.log(`🔁 [ROUE] ${room} - Mode consécutif: ${enabled ? "ON" : "OFF"}`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
   });
 
   socket.on("roue:winner_selected", (p) => {
     const { room, winnerName } = p;
     if (!room || !winnerName) return;
     const s = ensureOverlayState(room, "roue_loto");
-    s.state = "ready";
-    if (!s.data.consecutifMode) {
-      console.log(`🏆 [ROUE] ${room} - Gagnant: "${winnerName}" (mode consécutif OFF, liste inchangée)`);
-      return;
-    }
-    if (!s.data.participants) return;
-    const idx = s.data.participants.findIndex(pp => {
-      const n = typeof pp === "string" ? pp : pp.name;
-      return n === winnerName;
-    });
-    if (idx !== -1) {
-      s.data.participants.splice(idx, 1);
-      console.log(`🏆 [ROUE] ${room} - Mode consécutif: "${winnerName}" retiré (reste ${s.data.participants.length})`);
-      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
-    }
+    s.state = "winner";
+    s.data.winnerName = winnerName;
+    console.log(`🏆 [ROUE] ${room} - Gagnant: "${winnerName}" (état=winner, retrait au prochain spin)`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "winner", data: s.data });
   });
 
   // ============================================================
