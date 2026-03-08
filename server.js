@@ -141,7 +141,7 @@ app.get("/health", (req, res) => {
   const memoryUsage = process.memoryUsage();
   res.json({
     status: "ok",
-    version: "5.16",
+    version: "5.18",
     timestamp: new Date().toISOString(),
     uptime: Math.floor(uptime),
     memory: {
@@ -153,7 +153,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/", (req, res) => res.send("MDI Server V5.16 Online"));
+app.get("/", (req, res) => res.send("MDI Server V5.18 Online"));
 
 app.get("/debug/questions", requireAdmin, async (req, res) => {
   const room = String(req.query.room || "").trim();
@@ -329,7 +329,7 @@ app.post("/api/control", async (req, res) => {
 
   if (action === "nuage_on") {
     const sRoue = ensureOverlayState(room, "roue_loto");
-    if (sRoue.state !== "idle") {
+    if (sRoue.state !== "idle" && sRoue.state !== "standby") {
       sRoue.state = "idle";
       io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "idle", data: {} });
     }
@@ -367,12 +367,14 @@ app.post("/api/control", async (req, res) => {
       io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: "idle", data: {} });
     }
     const s = ensureOverlayState(room, "roue_loto");
-    s.state = "active";
+    s.state = "standby";
     s.data.activatedAt = Date.now();
-    if (!s.data.participants)   s.data.participants   = [];
-    if (!s.data.consecutifMode) s.data.consecutifMode = false;
-    console.log(`🎮 [API] ${room} - Roue ON`);
-    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "active", data: s.data });
+    if (!s.data.participants)         s.data.participants         = [];
+    if (!s.data.remote_participants)  s.data.remote_participants  = [];
+    if (!s.data.feed_mode)            s.data.feed_mode            = "chat";
+    if (!s.data.consecutifMode)       s.data.consecutifMode       = false;
+    console.log(`🎮 [API] ${room} - Roue ON (standby)`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: s.data });
     return res.json({ ok: true, action });
   }
 
@@ -384,13 +386,68 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  if (action === "roue_show") {
+    const s = ensureOverlayState(room, "roue_loto");
+    if (s.state !== "standby") return res.status(409).json({ ok: false, error: "roue_not_in_standby", state: s.state });
+    if (!s.data.remote_participants) s.data.remote_participants = [];
+    if (!s.data.feed_mode || s.data.feed_mode === "chat") {
+      s.state = "collecting";
+      s.data.participants = [];
+      s.data.winnerName = null;
+      console.log(`🎮 [API] ${room} - Roue SHOW (chat → collecting)`);
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
+    } else {
+      s.data.participants = [...s.data.remote_participants];
+      s.state = "ready";
+      s.data.winnerName = null;
+      console.log(`🎮 [API] ${room} - Roue SHOW (remote → ready, ${s.data.participants.length} participants)`);
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
+    }
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "roue_hide") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.state = "standby";
+    console.log(`🎮 [API] ${room} - Roue HIDE (→ standby)`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: s.data });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "roue_reopen_collect") {
+    const s = ensureOverlayState(room, "roue_loto");
+    if (s.state === "collecting") return res.json({ ok: true, action, already: true });
+    s.state = "collecting";
+    console.log(`🎮 [API] ${room} - Roue reopen collect (sans vider les participants)`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === "roue_set_feed_mode") {
+    const mode = payload?.mode;
+    if (mode !== "chat" && mode !== "remote") return res.status(400).json({ ok: false, error: "mode_invalide, valeurs: chat|remote" });
+    const s = ensureOverlayState(room, "roue_loto");
+    s.data.feed_mode = mode;
+    s.data.participants = [];
+    if (s.state !== "idle" && s.state !== "standby") s.state = "standby";
+    console.log(`🎮 [API] ${room} - Roue feed mode: ${mode}`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+    return res.json({ ok: true, action, mode });
+  }
+
+  if (action === "roue_clear_remote_participants") {
+    const s = ensureOverlayState(room, "roue_loto");
+    s.data.remote_participants = [];
+    console.log(`🎮 [API] ${room} - Roue: liste organisateur vidée`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+    return res.json({ ok: true, action });
+  }
+
   if (action === "roue_start_collect") {
     const s = ensureOverlayState(room, "roue_loto");
+    // Rétrocompatibilité Stream Deck : ouvre la collecte sans vider les participants
     s.state = "collecting";
-    s.data.participants = [];
-    s.data.winnerName = null;
-    console.log(`🎮 [API] ${room} - Roue start collect`);
-    io.to(room).emit("roue:start_collect");
+    console.log(`🎮 [API] ${room} - Roue start collect (rétrocompat)`);
     io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
     return res.json({ ok: true, action });
   }
@@ -435,12 +492,12 @@ app.post("/api/control", async (req, res) => {
 
   if (action === "roue_reset") {
     const s = ensureOverlayState(room, "roue_loto");
-    s.state = "idle";
+    s.state = "standby";
     s.data.participants = [];
-    s.data.consecutifMode = false;
     s.data.winnerName = null;
-    console.log(`🎮 [API] ${room} - Roue reset`);
-    io.to(room).emit("roue:reset");
+    // remote_participants conservée intentionnellement
+    console.log(`🎮 [API] ${room} - Roue reset (→ standby, liste organisateur conservée)`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: s.data });
     return res.json({ ok: true, action });
   }
 
@@ -471,7 +528,7 @@ app.post("/api/control", async (req, res) => {
       io.to(room).emit("overlay:state", { overlay: "nuage_de_mots", state: "idle", data: {} });
     }
     const sRoue = ensureOverlayState(room, "roue_loto");
-    if (sRoue.state !== "idle") {
+    if (sRoue.state !== "idle" && sRoue.state !== "standby") {
       sRoue.state = "idle";
       io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "idle", data: {} });
     }
@@ -822,14 +879,20 @@ io.on("connection", (socket) => {
   socket.on("control:activate_overlay", (payload) => {
     const { room, overlay } = payload;
     const s = ensureOverlayState(room, overlay);
-    s.state = "active";
     s.data.activatedAt = Date.now();
-    if (overlay === "nuage_de_mots") { s.data.words = {}; }
-    if (overlay === "roue_loto") { s.data.participants = []; s.data.consecutifMode = false; }
-    if (overlay === "commentaires") { s.data.flux = []; s.data.queue = []; s.data.current = null; s.data.minWords = 4; }
-    if (overlay === "match_equipes") { s.data.teamA = { name: "ÉQUIPE A", score: 0 }; s.data.teamB = { name: "ÉQUIPE B", score: 0 }; }
-    console.log(`✅ [${room}] Overlay "${overlay}" activé`);
-    io.to(room).emit("overlay:state", { overlay, state: "active", data: s.data });
+    if (overlay === "nuage_de_mots") { s.state = "active"; s.data.words = {}; }
+    if (overlay === "roue_loto") {
+      s.state = "standby";
+      s.data.participants = [];
+      s.data.consecutifMode = false;
+      if (!s.data.remote_participants) s.data.remote_participants = [];
+      if (!s.data.feed_mode) s.data.feed_mode = "chat";
+    }
+    if (overlay === "commentaires") { s.state = "active"; s.data.flux = []; s.data.queue = []; s.data.current = null; s.data.minWords = 4; }
+    if (overlay === "match_equipes") { s.state = "active"; s.data.teamA = { name: "ÉQUIPE A", score: 0 }; s.data.teamB = { name: "ÉQUIPE B", score: 0 }; }
+    if (!["nuage_de_mots", "roue_loto", "commentaires", "match_equipes"].includes(overlay)) s.state = "active";
+    console.log(`✅ [${room}] Overlay "${overlay}" activé (état: ${s.state})`);
+    io.to(room).emit("overlay:state", { overlay, state: s.state, data: s.data });
   });
 
   socket.on("control:deactivate_overlay", (payload) => {
@@ -867,9 +930,9 @@ io.on("connection", (socket) => {
 
       Object.keys(r.overlays).forEach(overlayName => {
         const overlay = r.overlays[overlayName];
-        if (overlay.state !== "active") return;
 
         if (overlayName === "nuage_de_mots") {
+          if (overlay.state !== "active") return;
           if (!overlay.data.words) overlay.data.words = {};
           const word = rawVote.trim().toLowerCase();
           if (choice) return;
@@ -883,14 +946,21 @@ io.on("connection", (socket) => {
         }
 
         if (overlayName === "roue_loto") {
+          // N'accepte des participants que si la collecte est ouverte ET en mode chat
+          if (overlay.state !== "collecting") return;
+          if (overlay.data.feed_mode === "remote") return;
           if (!overlay.data.participants) overlay.data.participants = [];
-          if (user !== "Anonyme" && !overlay.data.participants.includes(user)) {
-            overlay.data.participants.push(user);
-            io.to(room).emit("overlay:state", { overlay: overlayName, state: "active", data: overlay.data });
+          const participantName = (user !== "Anonyme") ? user : rawVoteOriginal.trim();
+          if (!participantName) return;
+          const key = participantName.toLowerCase();
+          if (!overlay.data.participants.some(pp => (typeof pp === "string" ? pp : pp.name).toLowerCase() === key)) {
+            overlay.data.participants.push({ name: participantName, key });
+            io.to(room).emit("overlay:state", { overlay: overlayName, state: overlay.state, data: overlay.data });
           }
         }
 
         if (overlayName === "commentaires") {
+          if (overlay.state !== "active") return;
           const minWords = overlay.data.minWords || 4;
           const wordCount = rawVote.split(/\s+/).filter(Boolean).length;
           if (wordCount < minWords) return;
@@ -982,13 +1052,108 @@ io.on("connection", (socket) => {
   // HANDLERS ROUE LOTO
   // ============================================================
 
+  socket.on("roue:show", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state !== "standby") return;
+    if (!s.data.remote_participants) s.data.remote_participants = [];
+    if (!s.data.feed_mode || s.data.feed_mode === "chat") {
+      s.state = "collecting";
+      s.data.participants = [];
+      s.data.winnerName = null;
+      console.log(`🎡 [ROUE] ${p.room} - SHOW (chat → collecting)`);
+      io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
+    } else {
+      s.data.participants = [...s.data.remote_participants];
+      s.state = "ready";
+      s.data.winnerName = null;
+      console.log(`🎡 [ROUE] ${p.room} - SHOW (remote → ready, ${s.data.participants.length} participants)`);
+      io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
+    }
+  });
+
+  socket.on("roue:hide", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.state = "standby";
+    console.log(`🎡 [ROUE] ${p.room} - HIDE (→ standby)`);
+    io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: s.data });
+  });
+
+  socket.on("roue:reopen_collect", (p) => {
+    const s = ensureOverlayState(p.room, "roue_loto");
+    if (s.state === "collecting") return;
+    s.state = "collecting";
+    console.log(`📝 [ROUE] ${p.room} - Réouverture collecte (participants conservés)`);
+    io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
+  });
+
+  socket.on("roue:set_feed_mode", (p) => {
+    const { room, mode } = p;
+    if (!room || (mode !== "chat" && mode !== "remote")) return;
+    const s = ensureOverlayState(room, "roue_loto");
+    s.data.feed_mode = mode;
+    s.data.participants = [];
+    if (s.state !== "idle" && s.state !== "standby") s.state = "standby";
+    console.log(`🎡 [ROUE] ${room} - Feed mode: ${mode}`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+  });
+
+  socket.on("roue:add_remote_participant", (p) => {
+    const { room, name } = p;
+    if (!room || !name) return;
+    const s = ensureOverlayState(room, "roue_loto");
+    if (!s.data.remote_participants) s.data.remote_participants = [];
+    const clean = String(name).trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (!s.data.remote_participants.some(pp => (typeof pp === "string" ? pp : pp.name).toLowerCase() === key)) {
+      s.data.remote_participants.push({ name: clean, key });
+      console.log(`➕ [ROUE] ${room} - Participant organisateur: "${clean}" (total: ${s.data.remote_participants.length})`);
+      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+    }
+  });
+
+  socket.on("roue:remove_remote_participant", (p) => {
+    const { room, name, index } = p;
+    if (!room) return;
+    const s = ensureOverlayState(room, "roue_loto");
+    if (!s.data.remote_participants) return;
+    let idx = -1;
+    if (index !== undefined && index !== null && index >= 0 && index < s.data.remote_participants.length) idx = index;
+    else if (name) idx = s.data.remote_participants.findIndex(pp => (typeof pp === "string" ? pp : pp.name) === name);
+    if (idx === -1) return;
+    const removed = s.data.remote_participants[idx];
+    s.data.remote_participants.splice(idx, 1);
+    const removedName = typeof removed === "string" ? removed : removed.name;
+    console.log(`❌ [ROUE] ${room} - Participant organisateur supprimé: "${removedName}"`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+  });
+
+  socket.on("roue:edit_remote_participant", (p) => {
+    const { room, index, newName } = p;
+    if (!room || !newName) return;
+    const s = ensureOverlayState(room, "roue_loto");
+    if (!s.data.remote_participants || index < 0 || index >= s.data.remote_participants.length) return;
+    const clean = String(newName).trim();
+    if (!clean) return;
+    const old = s.data.remote_participants[index];
+    s.data.remote_participants[index] = { name: clean, key: clean.toLowerCase() };
+    console.log(`✏️ [ROUE] ${room} - Participant organisateur: "${typeof old === "string" ? old : old.name}" → "${clean}"`);
+    io.to(room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+  });
+
+  socket.on("roue:clear_remote_participants", (p) => {
+    if (!p.room) return;
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.data.remote_participants = [];
+    console.log(`🗑️ [ROUE] ${p.room} - Liste organisateur vidée`);
+    io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+  });
+
   socket.on("roue:start_collect", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
+    // Rétrocompatibilité : ouvre la collecte sans vider les participants
     s.state = "collecting";
-    s.data.participants = [];
-    s.data.winnerName = null;
-    console.log(`📝 [ROUE] ${p.room} - Démarrage collecte`);
-    io.to(p.room).emit("roue:start_collect");
+    console.log(`📝 [ROUE] ${p.room} - Démarrage/réouverture collecte`);
     io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
   });
 
@@ -1028,12 +1193,12 @@ io.on("connection", (socket) => {
 
   socket.on("roue:reset", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
-    s.state = "idle";
+    s.state = "standby";
     s.data.participants = [];
-    s.data.consecutifMode = false;
     s.data.winnerName = null;
-    console.log(`🔄 [ROUE] ${p.room} - Reset`);
-    io.to(p.room).emit("roue:reset");
+    // remote_participants conservée intentionnellement
+    console.log(`🔄 [ROUE] ${p.room} - Reset (→ standby, liste organisateur conservée)`);
+    io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: s.data });
   });
 
   socket.on("roue:add_participant", (p) => {
