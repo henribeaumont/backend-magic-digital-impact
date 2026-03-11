@@ -307,8 +307,8 @@ app.post("/api/control", async (req, res) => {
   }
   if (action === "match_reset") {
     const s = ensureOverlayState(room, "match_equipes");
-    if (!s.data.teamA) s.data.teamA = { name: "ÉQUIPE A", score: 0 };
-    if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
+    if (!s.data.teamA) s.data.teamA = { name: "", score: 0, color: "" };
+    if (!s.data.teamB) s.data.teamB = { name: "", score: 0, color: "" };
     s.data.teamA.score = 0;
     s.data.teamB.score = 0;
     console.log(`🔄 [MATCH] ${room} - Reset 0-0`);
@@ -889,7 +889,14 @@ io.on("connection", (socket) => {
       if (!s.data.feed_mode) s.data.feed_mode = "chat";
     }
     if (overlay === "commentaires") { s.state = "active"; s.data.flux = []; s.data.queue = []; s.data.current = null; s.data.minWords = 4; }
-    if (overlay === "match_equipes") { s.state = "active"; s.data.teamA = { name: "ÉQUIPE A", score: 0 }; s.data.teamB = { name: "ÉQUIPE B", score: 0 }; }
+    if (overlay === "match_equipes") {
+      s.state = "active";
+      // Préserver les noms et couleurs personnalisés ; uniquement réinitialiser les scores
+      if (!s.data.teamA) s.data.teamA = { name: "", score: 0, color: "" };
+      if (!s.data.teamB) s.data.teamB = { name: "", score: 0, color: "" };
+      s.data.teamA.score = 0;
+      s.data.teamB.score = 0;
+    }
     if (!["nuage_de_mots", "roue_loto", "commentaires", "match_equipes"].includes(overlay)) s.state = "active";
     console.log(`✅ [${room}] Overlay "${overlay}" activé (état: ${s.state})`);
     io.to(room).emit("overlay:state", { overlay, state: s.state, data: s.data });
@@ -1506,6 +1513,8 @@ io.on("connection", (socket) => {
     const { room } = payload;
     if (!room) return;
     const s = ensureOverlayState(room, "match_equipes");
+    if (!s.data.teamA) s.data.teamA = { name: "", score: 0, color: "" };
+    if (!s.data.teamB) s.data.teamB = { name: "", score: 0, color: "" };
     s.data.teamA.score = 0;
     s.data.teamB.score = 0;
     console.log(`🔄 [MATCH] ${room} - Reset 0-0`);
