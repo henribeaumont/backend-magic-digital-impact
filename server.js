@@ -1149,6 +1149,15 @@ io.on("connection", (socket) => {
     io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
   });
 
+  socket.on("roue:clear_participants", (p) => {
+    if (!p.room) return;
+    const s = ensureOverlayState(p.room, "roue_loto");
+    s.data.participants = [];
+    s.data.winnerName = null;
+    console.log(`🗑️ [ROUE] ${p.room} - Participants roue vidés`);
+    io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: s.state, data: s.data });
+  });
+
   socket.on("roue:start_collect", (p) => {
     const s = ensureOverlayState(p.room, "roue_loto");
     // Rétrocompatibilité : ouvre la collecte sans vider les participants
