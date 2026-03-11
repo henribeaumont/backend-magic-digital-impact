@@ -1512,6 +1512,21 @@ io.on("connection", (socket) => {
     io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
   });
 
+  socket.on("control:match_update_teams", (payload) => {
+    const { room, teamA, teamB, customizationEnabled } = payload;
+    if (!room) return;
+    const s = ensureOverlayState(room, "match_equipes");
+    if (!s.data.teamA) s.data.teamA = { name: "ÉQUIPE A", score: 0 };
+    if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
+    if (teamA?.name !== undefined) s.data.teamA.name = teamA.name;
+    if (teamA?.color !== undefined) s.data.teamA.color = teamA.color;
+    if (teamB?.name !== undefined) s.data.teamB.name = teamB.name;
+    if (teamB?.color !== undefined) s.data.teamB.color = teamB.color;
+    s.data.teamCustomization = { enabled: !!customizationEnabled };
+    console.log(`🎨 [MATCH] ${room} - Personnalisation: ${customizationEnabled ? 'ON' : 'OFF'}`);
+    io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
+  });
+
 });
 
 const PORT = process.env.PORT || 3000;
