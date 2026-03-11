@@ -1513,17 +1513,17 @@ io.on("connection", (socket) => {
   });
 
   socket.on("control:match_update_teams", (payload) => {
-    const { room, teamA, teamB, customizationEnabled } = payload;
+    const { room, teamA, teamB } = payload;
     if (!room) return;
     const s = ensureOverlayState(room, "match_equipes");
-    if (!s.data.teamA) s.data.teamA = { name: "ÉQUIPE A", score: 0 };
-    if (!s.data.teamB) s.data.teamB = { name: "ÉQUIPE B", score: 0 };
+    if (!s.data.teamA) s.data.teamA = { name: "", score: 0, color: "" };
+    if (!s.data.teamB) s.data.teamB = { name: "", score: 0, color: "" };
+    // Chaîne vide = la télécommande ne surcharge pas (CSS OBS reprend le contrôle)
     if (teamA?.name !== undefined) s.data.teamA.name = teamA.name;
     if (teamA?.color !== undefined) s.data.teamA.color = teamA.color;
     if (teamB?.name !== undefined) s.data.teamB.name = teamB.name;
     if (teamB?.color !== undefined) s.data.teamB.color = teamB.color;
-    s.data.teamCustomization = { enabled: !!customizationEnabled };
-    console.log(`🎨 [MATCH] ${room} - Personnalisation: ${customizationEnabled ? 'ON' : 'OFF'}`);
+    console.log(`🎨 [MATCH] ${room} - A:"${s.data.teamA.name}" B:"${s.data.teamB.name}"`);
     io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
   });
 
