@@ -1536,6 +1536,20 @@ io.on("connection", (socket) => {
     io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
   });
 
+  socket.on("control:tug_update_config", (payload) => {
+    const { room, nameLeft, nameRight, colorLeft, colorRight, triggerLeft, triggerRight } = payload;
+    if (!room) return;
+    const s = ensureOverlayState(room, "tug_of_war");
+    if (nameLeft    !== undefined) s.data.nameLeft    = nameLeft;
+    if (nameRight   !== undefined) s.data.nameRight   = nameRight;
+    if (colorLeft   !== undefined) s.data.colorLeft   = colorLeft;
+    if (colorRight  !== undefined) s.data.colorRight  = colorRight;
+    if (triggerLeft !== undefined) s.data.triggerLeft = triggerLeft;
+    if (triggerRight!== undefined) s.data.triggerRight= triggerRight;
+    console.log(`🎨 [TUG] ${room} - L:"${s.data.nameLeft}" R:"${s.data.nameRight}"`);
+    io.to(room).emit("overlay:state", { overlay: "tug_of_war", state: s.state, data: s.data });
+  });
+
 });
 
 const PORT = process.env.PORT || 3000;
