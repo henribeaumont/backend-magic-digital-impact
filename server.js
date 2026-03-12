@@ -1,10 +1,11 @@
 // ============================================================
-// MDI SERVER V5.17 - COMPLET
-// ✅ Tout V5.16 préservé (ZÉRO RÉGRESSION)
-// ✅ ROUE : machine à états deux étapes (winner → ready → spinning)
-// ✅ ROUE : overlay:state systématiquement émis pour sync remote ↔ Stream Deck
-// ✅ ROUE : mode consécutif broadcaste via overlay:state
-// ✅ ROUE : winnerName stocké dans s.data pour restauration d'état
+// MDI SERVER V5.18 - COMPLET
+// ✅ Tout V5.17 préservé (ZÉRO RÉGRESSION)
+// ✅ CHAT MDI : chat privé par room, token opaque, participants uniques
+// ✅ CHAT MDI : gate extension — quand Chat MDI actif, nouveau_vote ignoré
+// ✅ CHAT MDI : roue auto-alimentée par participants chat quand actif
+// ✅ CHAT MDI : commentaires avec auteur injecté depuis chat
+// ✅ CHAT MDI : toggle via télécommande et Stream Deck (chat_toggle)
 // ============================================================
 
 const express = require("express");
@@ -38,11 +39,32 @@ const supabase = supabaseEnabled ? createClient(SUPABASE_URL, SUPABASE_SERVICE_R
 // --- MÉMOIRE VIVE (ROOMS) ---
 const ROOMS = Object.create(null);
 
+// --- CHAT MDI : tokens opaques (token → roomId, sans exposer room_id/key dans l'URL) ---
+const CHAT_TOKENS = Object.create(null);
+
+function generateChatToken() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  let t = "";
+  for (let i = 0; i < 10; i++) t += chars[Math.floor(Math.random() * chars.length)];
+  return t;
+}
+
 function getRoom(id) {
   if (!ROOMS[id]) {
     ROOMS[id] = { overlays: {}, history: [], presence: {} };
   }
+  // Initialisation défensive du chat (backward-compat avec rooms déjà en mémoire)
+  if (!ROOMS[id].chat) {
+    ROOMS[id].chat = { active: false, token: null, participants: {}, messages: [] };
+  }
   return ROOMS[id];
+}
+
+// Helper : snapshot participants pour broadcast (sans les clés internes)
+function chatParticipantsList(room) {
+  const r = ROOMS[room];
+  if (!r || !r.chat) return [];
+  return Object.values(r.chat.participants).map(p => ({ prenom: p.prenom, nom: p.nom }));
 }
 
 function ensureOverlayState(roomId, overlay) {
@@ -154,6 +176,17 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/", (req, res) => res.send("MDI Server V5.18 Online"));
+
+// Validation token Chat MDI (appelé par la page chat au chargement)
+app.get("/api/chat/validate", (req, res) => {
+  const { t } = req.query;
+  if (!t) return res.status(400).json({ ok: false, error: "missing_token" });
+  const tokenData = CHAT_TOKENS[t];
+  if (!tokenData) return res.status(404).json({ ok: false, error: "invalid_token" });
+  const r = ROOMS[tokenData.room];
+  if (!r || !r.chat || !r.chat.active) return res.status(410).json({ ok: false, error: "chat_inactive" });
+  return res.json({ ok: true, active: true });
+});
 
 app.get("/debug/questions", requireAdmin, async (req, res) => {
   const room = String(req.query.room || "").trim();
@@ -517,6 +550,44 @@ app.post("/api/control", async (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  // Stream Deck : toggle Chat MDI ON/OFF
+  if (action === "chat_toggle") {
+    const r = getRoom(room);
+    if (r.chat.active) {
+      if (r.chat.token) delete CHAT_TOKENS[r.chat.token];
+      r.chat.active = false;
+      r.chat.token  = null;
+      r.chat.participants = {};
+      r.chat.messages = [];
+      const roue = r.overlays.roue_loto;
+      if (roue && roue.state === "collecting") {
+        roue.state = "standby";
+        roue.data.participants = [];
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: roue.data });
+      }
+      console.log(`🎮 [API] ${room} - Chat MDI OFF (Stream Deck)`);
+      io.to(room).emit("chat:state", { active: false, token: null, participants: [], messages: [] });
+      return res.json({ ok: true, action, active: false });
+    } else {
+      let token;
+      do { token = generateChatToken(); } while (CHAT_TOKENS[token]);
+      CHAT_TOKENS[token] = { room };
+      r.chat.active = true;
+      r.chat.token  = token;
+      r.chat.participants = {};
+      r.chat.messages = [];
+      const roue = r.overlays.roue_loto;
+      if (roue && roue.state !== "idle") {
+        roue.state = "collecting";
+        if (!roue.data.participants) roue.data.participants = [];
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: roue.data });
+      }
+      console.log(`🎮 [API] ${room} - Chat MDI ON (Stream Deck, token: ${token})`);
+      io.to(room).emit("chat:state", { active: true, token, participants: [], messages: [] });
+      return res.json({ ok: true, action, active: true, token });
+    }
+  }
+
   if (action === "quiz_load") {
     const questionKey = payload?.question_key;
     if (!questionKey) {
@@ -845,11 +916,28 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    // Nettoyage présence overlays (comportement inchangé)
     for (const { room, overlay } of socketOverlays) {
       const r = getRoom(room);
       if (r.presence[overlay]) { r.presence[overlay].online = false; r.presence[overlay].displaying = false; }
       console.log(`🔴 [PRÉSENCE] ${room} - ${overlay} : hors ligne (disconnect)`);
       io.to(room).emit("overlay:presence", { overlay, online: false, displaying: false });
+    }
+
+    // Nettoyage Chat MDI si ce socket était un participant
+    if (socket._chatRoom) {
+      const r = ROOMS[socket._chatRoom];
+      if (r && r.chat && r.chat.participants[socket.id]) {
+        const p = r.chat.participants[socket.id];
+        delete r.chat.participants[socket.id];
+        console.log(`💬 [CHAT MDI] ${socket._chatRoom} - ${p.prenom} ${p.nom} déconnecté`);
+        io.to(socket._chatRoom).emit("chat:state", {
+          active: r.chat.active,
+          token: r.chat.token,
+          participants: chatParticipantsList(socket._chatRoom),
+          messages: r.chat.messages.slice(-50)
+        });
+      }
     }
   });
 
@@ -923,6 +1011,11 @@ io.on("connection", (socket) => {
 
     if (room && rawVote) {
       const r = getRoom(room);
+
+      // === CHAT MDI GATE ===
+      // Quand Chat MDI est actif, la porte de l'extension est FERMÉE.
+      // Aucun nouveau_vote ne passe — aucun fonctionnement hybride possible.
+      if (r.chat && r.chat.active) return;
 
       const choice = extractChoiceABCD(rawVote);
       if (choice) {
@@ -1561,7 +1654,177 @@ io.on("connection", (socket) => {
     io.to(room).emit("overlay:state", { overlay: "tug_of_war", state: s.state, data: s.data });
   });
 
+  // ============================================================
+  // CHAT MDI — Système de chat privé par room (V5.18)
+  // ============================================================
+
+  // --- Toggle Chat MDI (appelé par la télécommande) ---
+  socket.on("chat:toggle", (p) => {
+    const { room } = p;
+    if (!room) return;
+    const r = getRoom(room);
+
+    if (r.chat.active) {
+      // Désactivation : révoquer le token, vider les participants
+      if (r.chat.token) delete CHAT_TOKENS[r.chat.token];
+      r.chat.active = false;
+      r.chat.token = null;
+      r.chat.participants = {};
+      r.chat.messages = [];
+
+      // La roue repasse en standby propre (plus de participants MDI)
+      const roue = r.overlays.roue_loto;
+      if (roue && roue.state === "collecting") {
+        roue.state = "standby";
+        roue.data.participants = [];
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: roue.data });
+      }
+
+      console.log(`💬 [CHAT MDI] ${room} - Désactivé`);
+      io.to(room).emit("chat:state", { active: false, token: null, participants: [], messages: [] });
+
+    } else {
+      // Activation : générer un token opaque, réinitialiser le chat
+      let token;
+      do { token = generateChatToken(); } while (CHAT_TOKENS[token]);
+      CHAT_TOKENS[token] = { room };
+      r.chat.active = true;
+      r.chat.token = token;
+      r.chat.participants = {};
+      r.chat.messages = [];
+
+      // Si la roue est déjà active, la passer en collecting (auto-alimentation)
+      const roue = r.overlays.roue_loto;
+      if (roue && roue.state !== "idle") {
+        roue.state = "collecting";
+        if (!roue.data.participants) roue.data.participants = [];
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: roue.data });
+      }
+
+      console.log(`💬 [CHAT MDI] ${room} - Activé (token: ${token})`);
+      io.to(room).emit("chat:state", { active: true, token, participants: [], messages: [] });
+    }
+  });
+
+  // --- Inscription participant (depuis la page chat) ---
+  socket.on("chat:join", (p) => {
+    const { token, prenom, nom } = p;
+    if (!token || !prenom || !nom) {
+      return socket.emit("chat:join_error", { reason: "missing_fields" });
+    }
+
+    const tokenData = CHAT_TOKENS[token];
+    if (!tokenData) return socket.emit("chat:join_error", { reason: "invalid_token" });
+
+    const room = tokenData.room;
+    const r = getRoom(room);
+    if (!r.chat.active) return socket.emit("chat:join_error", { reason: "chat_inactive" });
+
+    const prenomClean = String(prenom).trim().substring(0, 30);
+    const nomClean    = String(nom).trim().substring(0, 30);
+    if (!prenomClean || !nomClean) return socket.emit("chat:join_error", { reason: "invalid_name" });
+
+    // Unicité stricte sur le couple prénom+nom
+    const participantKey = `${prenomClean.toLowerCase()}_${nomClean.toLowerCase()}`;
+    const alreadyExists = Object.values(r.chat.participants).some(pp => pp.key === participantKey);
+    if (alreadyExists) return socket.emit("chat:join_error", { reason: "duplicate_name" });
+
+    // Enregistrement
+    r.chat.participants[socket.id] = { prenom: prenomClean, nom: nomClean, key: participantKey, joinedAt: Date.now() };
+    socket._chatRoom  = room;
+    socket._chatToken = token;
+    socket.join(room);
+
+    socket.emit("chat:join_ok", { prenom: prenomClean, nom: nomClean });
+
+    // Broadcast état à la télécommande
+    io.to(room).emit("chat:state", {
+      active: true,
+      token: r.chat.token,
+      participants: chatParticipantsList(room),
+      messages: r.chat.messages.slice(-50)
+    });
+
+    // Auto-alimentation roue loto si en cours de collecte
+    const roue = r.overlays.roue_loto;
+    if (roue && roue.state === "collecting") {
+      const fullName = `${prenomClean} ${nomClean}`;
+      const nameKey  = fullName.toLowerCase();
+      if (!roue.data.participants) roue.data.participants = [];
+      const alreadyOnRoue = roue.data.participants.some(pp =>
+        (typeof pp === "string" ? pp : pp.name).toLowerCase() === nameKey
+      );
+      if (!alreadyOnRoue) {
+        roue.data.participants.push({ name: fullName, key: nameKey });
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: roue.state, data: roue.data });
+      }
+    }
+
+    console.log(`💬 [CHAT MDI] ${room} - ${prenomClean} ${nomClean} rejoint (${Object.keys(r.chat.participants).length} connectés)`);
+  });
+
+  // --- Message participant ---
+  socket.on("chat:message", (p) => {
+    const { token, text } = p;
+    if (!token || !text) return;
+
+    const tokenData = CHAT_TOKENS[token];
+    if (!tokenData) return socket.emit("chat:error", { reason: "invalid_token" });
+
+    const room = tokenData.room;
+    const r    = getRoom(room);
+    if (!r.chat.active) return;
+
+    const participant = r.chat.participants[socket.id];
+    if (!participant) return socket.emit("chat:error", { reason: "not_joined" });
+
+    const cleanText = String(text).trim().substring(0, 500);
+    if (!cleanText) return;
+
+    const msgId  = `cmdi_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const author = `${participant.prenom} ${participant.nom}`;
+    const message = { id: msgId, author, prenom: participant.prenom, nom: participant.nom, text: cleanText, timestamp: Date.now() };
+
+    // Buffer circulaire (100 messages max)
+    r.chat.messages.push(message);
+    if (r.chat.messages.length > 100) r.chat.messages = r.chat.messages.slice(-100);
+
+    // Broadcast à tous dans la room (participants + télécommande)
+    io.to(room).emit("chat:broadcast", message);
+
+    // Injection dans l'overlay commentaires si actif (auteur réel préservé)
+    const commentaires = r.overlays.commentaires;
+    if (commentaires && commentaires.state === "active") {
+      const wordCount = cleanText.split(/\s+/).filter(Boolean).length;
+      const minWords  = commentaires.data.minWords || 4;
+      if (wordCount >= minWords) {
+        const cid   = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const cMsg  = { id: cid, author, text: cleanText, timestamp: Date.now(), sent: false };
+        if (!commentaires.data.flux) commentaires.data.flux = [];
+        commentaires.data.flux.push(cMsg);
+        if (commentaires.data.flux.length > 50) commentaires.data.flux = commentaires.data.flux.slice(-50);
+        io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: commentaires.data });
+        console.log(`💬 [COMMENTAIRES ← CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 30)}"`);
+      }
+    }
+
+    console.log(`💬 [CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 50)}"`);
+  });
+
+  // --- Demande état chat (télécommande se reconnecte) ---
+  socket.on("chat:get_state", (p) => {
+    const { room } = p;
+    if (!room) return;
+    const r = getRoom(room);
+    socket.emit("chat:state", {
+      active: r.chat.active,
+      token: r.chat.token,
+      participants: chatParticipantsList(room),
+      messages: r.chat.messages.slice(-50)
+    });
+  });
+
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server MDI V5.16 Online on ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server MDI V5.18 Online on ${PORT}`));
