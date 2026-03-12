@@ -551,9 +551,15 @@ app.post("/api/control", async (req, res) => {
   }
 
   // Stream Deck : toggle Chat MDI ON/OFF
-  if (action === "chat_toggle") {
+  if (action === "chat_toggle" || action === "chat_on" || action === "chat_off") {
     const r = getRoom(room);
-    if (r.chat.active) {
+    const shouldActivate = action === "chat_on"  ? true
+                         : action === "chat_off" ? false
+                         : !r.chat.active; // toggle
+
+    if (!shouldActivate) {
+      // --- Désactivation ---
+      if (!r.chat.active) return res.json({ ok: true, action, active: false, noop: true });
       if (r.chat.token) delete CHAT_TOKENS[r.chat.token];
       r.chat.active = false;
       r.chat.token  = null;
@@ -569,6 +575,8 @@ app.post("/api/control", async (req, res) => {
       io.to(room).emit("chat:state", { active: false, token: null, participants: [], messages: [] });
       return res.json({ ok: true, action, active: false });
     } else {
+      // --- Activation ---
+      if (r.chat.active) return res.json({ ok: true, action, active: true, token: r.chat.token, noop: true });
       let token;
       do { token = generateChatToken(); } while (CHAT_TOKENS[token]);
       CHAT_TOKENS[token] = { room };
