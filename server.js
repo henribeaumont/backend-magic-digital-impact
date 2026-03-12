@@ -1536,6 +1536,17 @@ io.on("connection", (socket) => {
     io.to(room).emit("overlay:state", { overlay: "match_equipes", state: s.state, data: s.data });
   });
 
+  socket.on("control:mot_magique_update_config", (payload) => {
+    const { room, word, trigger, threshold } = payload;
+    if (!room) return;
+    const s = ensureOverlayState(room, "mot_magique");
+    if (word      !== undefined) s.data.word      = word;
+    if (trigger   !== undefined) s.data.trigger   = trigger;
+    if (threshold !== undefined) s.data.threshold = threshold;
+    console.log(`✨ [MOT] ${room} - word:"${s.data.word}" trigger:"${s.data.trigger}" threshold:${s.data.threshold}`);
+    io.to(room).emit("overlay:state", { overlay: "mot_magique", state: s.state, data: s.data });
+  });
+
   socket.on("control:tug_update_config", (payload) => {
     const { room, nameLeft, nameRight, colorLeft, colorRight, triggerLeft, triggerRight } = payload;
     if (!room) return;
