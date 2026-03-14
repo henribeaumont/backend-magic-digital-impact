@@ -424,11 +424,22 @@ app.post("/api/control", async (req, res) => {
     if (s.state !== "standby") return res.status(409).json({ ok: false, error: "roue_not_in_standby", state: s.state });
     if (!s.data.remote_participants) s.data.remote_participants = [];
     if (!s.data.feed_mode || s.data.feed_mode === "chat") {
-      s.state = "collecting";
-      s.data.participants = [];
       s.data.winnerName = null;
-      console.log(`🎮 [API] ${room} - Roue SHOW (chat → collecting)`);
-      io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
+      const rChat = getRoom(room);
+      if (rChat.chat && rChat.chat.active && Object.keys(rChat.chat.participants).length > 0) {
+        s.data.participants = Object.values(rChat.chat.participants).map(pp => {
+          const fullName = `${pp.prenom} ${pp.nom}`;
+          return { name: fullName, key: fullName.toLowerCase() };
+        });
+        s.state = "ready";
+        console.log(`🎮 [API] ${room} - Roue SHOW (chat MDI → ready, ${s.data.participants.length} participants)`);
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
+      } else {
+        s.state = "collecting";
+        s.data.participants = [];
+        console.log(`🎮 [API] ${room} - Roue SHOW (chat → collecting)`);
+        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
+      }
     } else {
       s.data.participants = [...s.data.remote_participants];
       s.state = "ready";
@@ -716,7 +727,12 @@ app.post("/api/control", async (req, res) => {
     const s = ensureOverlayState(room, "mot_magique");
     s.state = "active";
     s.data.activatedAt = Date.now();
-    console.log(`🎮 [API] ${room} - Mot Magique ON`);
+    const rMot = getRoom(room);
+    if (rMot.chat && rMot.chat.active) {
+      const n = Object.keys(rMot.chat.participants).length;
+      s.data.totalParticipants = n > 0 ? n : null;
+    }
+    console.log(`🎮 [API] ${room} - Mot Magique ON (totalParticipants: ${s.data.totalParticipants ?? "auto"})`);
     io.to(room).emit("overlay:state", { overlay: "mot_magique", state: "active", data: s.data });
     return res.json({ ok: true, action });
   }
@@ -1174,21 +1190,23 @@ io.on("connection", (socket) => {
     if (s.state !== "standby") return;
     if (!s.data.remote_participants) s.data.remote_participants = [];
     if (!s.data.feed_mode || s.data.feed_mode === "chat") {
-      s.state = "collecting";
       s.data.winnerName = null;
-      // Si Chat MDI actif, pré-charger les participants déjà connectés
       const rChat = getRoom(p.room);
       if (rChat.chat && rChat.chat.active && Object.keys(rChat.chat.participants).length > 0) {
+        // Chat MDI actif avec participants → charger et passer directement en ready
         s.data.participants = Object.values(rChat.chat.participants).map(pp => {
           const fullName = `${pp.prenom} ${pp.nom}`;
           return { name: fullName, key: fullName.toLowerCase() };
         });
-        console.log(`🎡 [ROUE] ${p.room} - SHOW (chat MDI → collecting, ${s.data.participants.length} participants pré-chargés)`);
+        s.state = "ready";
+        console.log(`🎡 [ROUE] ${p.room} - SHOW (chat MDI → ready, ${s.data.participants.length} participants)`);
+        io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "ready", data: s.data });
       } else {
+        s.state = "collecting";
         s.data.participants = [];
         console.log(`🎡 [ROUE] ${p.room} - SHOW (chat → collecting)`);
+        io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
       }
-      io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
     } else {
       s.data.participants = [...s.data.remote_participants];
       s.state = "ready";
@@ -1671,7 +1689,12 @@ io.on("connection", (socket) => {
     if (word      !== undefined) s.data.word      = word;
     if (trigger   !== undefined) s.data.trigger   = trigger;
     if (threshold !== undefined) s.data.threshold = threshold;
-    console.log(`✨ [MOT] ${room} - word:"${s.data.word}" trigger:"${s.data.trigger}" threshold:${s.data.threshold}`);
+    const rMot = getRoom(room);
+    if (rMot.chat && rMot.chat.active) {
+      const n = Object.keys(rMot.chat.participants).length;
+      s.data.totalParticipants = n > 0 ? n : null;
+    }
+    console.log(`✨ [MOT] ${room} - word:"${s.data.word}" trigger:"${s.data.trigger}" threshold:${s.data.threshold} totalParticipants:${s.data.totalParticipants ?? "auto"}`);
     io.to(room).emit("overlay:state", { overlay: "mot_magique", state: s.state, data: s.data });
   });
 
@@ -1790,6 +1813,14 @@ io.on("connection", (socket) => {
         roue.data.participants.push({ name: fullName, key: nameKey });
         io.to(room).emit("overlay:state", { overlay: "roue_loto", state: roue.state, data: roue.data });
       }
+    }
+
+    // Mettre à jour totalParticipants pour mot_magique si actif
+    const motMagique = r.overlays.mot_magique;
+    if (motMagique && motMagique.state === "active") {
+      const n = Object.keys(r.chat.participants).length;
+      motMagique.data.totalParticipants = n > 0 ? n : null;
+      io.to(room).emit("overlay:state", { overlay: "mot_magique", state: "active", data: motMagique.data });
     }
 
     console.log(`💬 [CHAT MDI] ${room} - ${prenomClean} ${nomClean} rejoint (${Object.keys(r.chat.participants).length} connectés)`);
