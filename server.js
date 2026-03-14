@@ -55,7 +55,7 @@ function getRoom(id) {
   }
   // Initialisation défensive du chat (backward-compat avec rooms déjà en mémoire)
   if (!ROOMS[id].chat) {
-    ROOMS[id].chat = { active: false, token: null, participants: {}, messages: [] };
+    ROOMS[id].chat = { active: false, token: null, participants: {}, messages: [], fastest: null };
   }
   return ROOMS[id];
 }
@@ -551,6 +551,18 @@ app.post("/api/control", async (req, res) => {
   }
 
   // Stream Deck : toggle Chat MDI ON/OFF
+  if (action === "show_fastest") {
+    const r = getRoom(room);
+    if (!r.chat || !r.chat.fastest) return res.json({ ok: false, error: "no_fastest" });
+    const comm = ensureOverlayState(room, "commentaires");
+    if (comm.state !== "active") return res.json({ ok: false, error: "commentaires_not_active" });
+    const f = r.chat.fastest;
+    comm.data.current = { id: `fastest_${Date.now()}`, author: `⚡ ${f.author}`, text: "Premier à répondre !" };
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: comm.data });
+    console.log(`🎮 [API] ${room} - show_fastest → ${f.author}`);
+    return res.json({ ok: true, action, fastest: f });
+  }
+
   if (action === "chat_toggle" || action === "chat_on" || action === "chat_off") {
     const r = getRoom(room);
     const shouldActivate = action === "chat_on"  ? true
@@ -601,6 +613,8 @@ app.post("/api/control", async (req, res) => {
     }
     const r = getRoom(room);
     r.history = [];
+    r.chat.fastest = null;
+    io.to(room).emit("chat:fastest", null);
     const { data: q } = await supabase
       .from("questions")
       .select("*")
@@ -1008,6 +1022,11 @@ io.on("connection", (socket) => {
     if (room && rawVote) {
       const r = getRoom(room);
 
+      // === CHAT MDI GATE ===
+      // Quand Chat MDI est actif, l'extension est bloquée pour tous les overlays.
+      // Tout passe par chat:message / chat:join à la place.
+      if (r.chat && r.chat.active) return;
+
       const choice = extractChoiceABCD(rawVote);
       if (choice) {
         const alreadyVoted = r.history.find(v => v.user === user && user !== "Anonyme");
@@ -1051,8 +1070,6 @@ io.on("connection", (socket) => {
         }
 
         if (overlayName === "commentaires") {
-          // Quand Chat MDI est actif, l'extension ne doit pas alimenter commentaires
-          if (r.chat && r.chat.active) return;
           if (overlay.state !== "active") return;
           const minWords = overlay.data.minWords || 4;
           const wordCount = rawVote.split(/\s+/).filter(Boolean).length;
@@ -1108,6 +1125,8 @@ io.on("connection", (socket) => {
     if (clientAuth.room_key !== p.key) { console.log("❌ [load_question] mauvaise clé"); return; }
     const r = getRoom(p.room);
     r.history = [];
+    r.chat.fastest = null;
+    io.to(p.room).emit("chat:fastest", null);
     const { data: q } = await supabase
       .from("questions").select("*")
       .eq("room_id", p.room).eq("question_key", p.question_key).maybeSingle();
@@ -1794,7 +1813,41 @@ io.on("connection", (socket) => {
       console.log(`💬 [COMMENTAIRES ← CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 30)}"`);
     }
 
+    // Injection quiz si actif : traitement des réponses A/B/C/D + tracking du plus rapide
+    const quiz = r.overlays.quiz_ou_sondage;
+    if (quiz && (quiz.state === "question" || quiz.state === "options")) {
+      const choice = extractChoiceABCD(cleanText);
+      if (choice) {
+        const alreadyVoted = r.history.find(v => v.user === author);
+        if (!alreadyVoted) {
+          r.history.push({ user: author, choice, time: Date.now() });
+          quiz.data.percents = calculatePercents(getVoteStats(r.history));
+          io.to(room).emit("overlay:state", { overlay: "quiz_ou_sondage", state: quiz.state, data: quiz.data });
+          // Tracking du plus rapide : premier à répondre (toute réponse)
+          if (!r.chat.fastest) {
+            r.chat.fastest = { author, prenom: participant.prenom, nom: participant.nom, choice, timestamp: Date.now() };
+            io.to(room).emit("chat:fastest", r.chat.fastest);
+            console.log(`⚡ [PLUS RAPIDE ← CHAT MDI] ${room} - ${author} (${choice})`);
+          }
+        }
+      }
+    }
+
     console.log(`💬 [CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 50)}"`);
+  });
+
+  // --- Afficher le plus rapide sur l'overlay commentaires ---
+  socket.on("control:show_fastest", (payload) => {
+    const { room } = payload;
+    if (!room) return;
+    const r = getRoom(room);
+    if (!r.chat.fastest) return;
+    const comm = ensureOverlayState(room, "commentaires");
+    if (comm.state !== "active") return;
+    const f = r.chat.fastest;
+    comm.data.current = { id: `fastest_${Date.now()}`, author: `⚡ ${f.author}`, text: "Premier à répondre !" };
+    io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: comm.data });
+    console.log(`⚡ [SHOW FASTEST] ${room} - ${f.author}`);
   });
 
   // --- Demande état chat (télécommande se reconnecte) ---
@@ -1806,7 +1859,8 @@ io.on("connection", (socket) => {
       active: r.chat.active,
       token: r.chat.token,
       participants: chatParticipantsList(room),
-      messages: r.chat.messages.slice(-50)
+      messages: r.chat.messages.slice(-50),
+      fastest: r.chat.fastest || null
     });
   });
 
