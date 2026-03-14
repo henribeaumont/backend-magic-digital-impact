@@ -1709,6 +1709,19 @@ io.on("connection", (socket) => {
         io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: roue.data });
       }
 
+      // Auto-activer commentaires si idle (requis pour recevoir les messages Chat MDI)
+      const comm = ensureOverlayState(room, "commentaires");
+      if (comm.state === "idle") {
+        comm.state = "active";
+        comm.data.flux    = [];
+        comm.data.queue   = [];
+        comm.data.current = null;
+        comm.data.minWords = 4;
+        io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: comm.data });
+        console.log(`💬 [CHAT MDI] ${room} - Commentaires auto-activé`);
+      }
+
+
       console.log(`💬 [CHAT MDI] ${room} - Activé (token: ${token})`);
       io.to(room).emit("chat:state", { active: true, token, participants: [], messages: [] });
     }
@@ -1800,20 +1813,16 @@ io.on("connection", (socket) => {
     // Broadcast à tous dans la room (participants + télécommande)
     io.to(room).emit("chat:broadcast", message);
 
-    // Injection dans l'overlay commentaires si actif (auteur réel préservé)
+    // Injection dans l'overlay commentaires si actif (auteur réel préservé, sans filtre minWords)
     const commentaires = r.overlays.commentaires;
     if (commentaires && commentaires.state === "active") {
-      const wordCount = cleanText.split(/\s+/).filter(Boolean).length;
-      const minWords  = commentaires.data.minWords || 4;
-      if (wordCount >= minWords) {
-        const cid   = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const cMsg  = { id: cid, author, text: cleanText, timestamp: Date.now(), sent: false };
-        if (!commentaires.data.flux) commentaires.data.flux = [];
-        commentaires.data.flux.push(cMsg);
-        if (commentaires.data.flux.length > 50) commentaires.data.flux = commentaires.data.flux.slice(-50);
-        io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: commentaires.data });
-        console.log(`💬 [COMMENTAIRES ← CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 30)}"`);
-      }
+      const cid  = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const cMsg = { id: cid, author, text: cleanText, timestamp: Date.now(), sent: false };
+      if (!commentaires.data.flux) commentaires.data.flux = [];
+      commentaires.data.flux.push(cMsg);
+      if (commentaires.data.flux.length > 50) commentaires.data.flux = commentaires.data.flux.slice(-50);
+      io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: commentaires.data });
+      console.log(`💬 [COMMENTAIRES ← CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 30)}"`);
     }
 
     console.log(`💬 [CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 50)}"`);
