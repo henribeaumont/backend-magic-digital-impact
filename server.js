@@ -565,12 +565,6 @@ app.post("/api/control", async (req, res) => {
       r.chat.token  = null;
       r.chat.participants = {};
       r.chat.messages = [];
-      const roue = r.overlays.roue_loto;
-      if (roue && roue.state === "collecting") {
-        roue.state = "standby";
-        roue.data.participants = [];
-        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: roue.data });
-      }
       console.log(`🎮 [API] ${room} - Chat MDI OFF (Stream Deck)`);
       io.to(room).emit("chat:state", { active: false, token: null, participants: [], messages: [] });
       return res.json({ ok: true, action, active: false });
@@ -584,12 +578,6 @@ app.post("/api/control", async (req, res) => {
       r.chat.token  = token;
       r.chat.participants = {};
       r.chat.messages = [];
-      const roue = r.overlays.roue_loto;
-      if (roue && roue.state !== "idle") {
-        roue.state = "collecting";
-        if (!roue.data.participants) roue.data.participants = [];
-        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: roue.data });
-      }
       console.log(`🎮 [API] ${room} - Chat MDI ON (Stream Deck, token: ${token})`);
       io.to(room).emit("chat:state", { active: true, token, participants: [], messages: [] });
       return res.json({ ok: true, action, active: true, token });
@@ -1020,11 +1008,6 @@ io.on("connection", (socket) => {
     if (room && rawVote) {
       const r = getRoom(room);
 
-      // === CHAT MDI GATE ===
-      // Quand Chat MDI est actif, la porte de l'extension est FERMÉE.
-      // Aucun nouveau_vote ne passe — aucun fonctionnement hybride possible.
-      if (r.chat && r.chat.active) return;
-
       const choice = extractChoiceABCD(rawVote);
       if (choice) {
         const alreadyVoted = r.history.find(v => v.user === user && user !== "Anonyme");
@@ -1068,6 +1051,8 @@ io.on("connection", (socket) => {
         }
 
         if (overlayName === "commentaires") {
+          // Quand Chat MDI est actif, l'extension ne doit pas alimenter commentaires
+          if (r.chat && r.chat.active) return;
           if (overlay.state !== "active") return;
           const minWords = overlay.data.minWords || 4;
           const wordCount = rawVote.split(/\s+/).filter(Boolean).length;
@@ -1680,14 +1665,6 @@ io.on("connection", (socket) => {
       r.chat.participants = {};
       r.chat.messages = [];
 
-      // La roue repasse en standby propre (plus de participants MDI)
-      const roue = r.overlays.roue_loto;
-      if (roue && roue.state === "collecting") {
-        roue.state = "standby";
-        roue.data.participants = [];
-        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "standby", data: roue.data });
-      }
-
       console.log(`💬 [CHAT MDI] ${room} - Désactivé`);
       io.to(room).emit("chat:state", { active: false, token: null, participants: [], messages: [] });
 
@@ -1700,14 +1677,6 @@ io.on("connection", (socket) => {
       r.chat.token = token;
       r.chat.participants = {};
       r.chat.messages = [];
-
-      // Si la roue est déjà active, la passer en collecting (auto-alimentation)
-      const roue = r.overlays.roue_loto;
-      if (roue && roue.state !== "idle") {
-        roue.state = "collecting";
-        if (!roue.data.participants) roue.data.participants = [];
-        io.to(room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: roue.data });
-      }
 
       // Auto-activer commentaires si idle (requis pour recevoir les messages Chat MDI)
       const comm = ensureOverlayState(room, "commentaires");
