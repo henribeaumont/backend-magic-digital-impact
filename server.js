@@ -555,7 +555,12 @@ app.post("/api/control", async (req, res) => {
     const r = getRoom(room);
     if (!r.chat || !r.chat.fastest) return res.json({ ok: false, error: "no_fastest" });
     const comm = ensureOverlayState(room, "commentaires");
-    if (comm.state !== "active") return res.json({ ok: false, error: "commentaires_not_active" });
+    if (comm.state === "idle") {
+      comm.state = "active";
+      comm.data.flux = comm.data.flux || [];
+      comm.data.queue = comm.data.queue || [];
+      comm.data.current = null;
+    }
     const f = r.chat.fastest;
     comm.data.current = { id: `fastest_${Date.now()}`, author: `⚡ ${f.author}`, text: "Premier à répondre !" };
     io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: comm.data });
@@ -1170,9 +1175,19 @@ io.on("connection", (socket) => {
     if (!s.data.remote_participants) s.data.remote_participants = [];
     if (!s.data.feed_mode || s.data.feed_mode === "chat") {
       s.state = "collecting";
-      s.data.participants = [];
       s.data.winnerName = null;
-      console.log(`🎡 [ROUE] ${p.room} - SHOW (chat → collecting)`);
+      // Si Chat MDI actif, pré-charger les participants déjà connectés
+      const rChat = getRoom(p.room);
+      if (rChat.chat && rChat.chat.active && Object.keys(rChat.chat.participants).length > 0) {
+        s.data.participants = Object.values(rChat.chat.participants).map(pp => {
+          const fullName = `${pp.prenom} ${pp.nom}`;
+          return { name: fullName, key: fullName.toLowerCase() };
+        });
+        console.log(`🎡 [ROUE] ${p.room} - SHOW (chat MDI → collecting, ${s.data.participants.length} participants pré-chargés)`);
+      } else {
+        s.data.participants = [];
+        console.log(`🎡 [ROUE] ${p.room} - SHOW (chat → collecting)`);
+      }
       io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
     } else {
       s.data.participants = [...s.data.remote_participants];
@@ -1194,7 +1209,15 @@ io.on("connection", (socket) => {
     const s = ensureOverlayState(p.room, "roue_loto");
     if (s.state === "collecting") return;
     s.state = "collecting";
-    console.log(`📝 [ROUE] ${p.room} - Réouverture collecte (participants conservés)`);
+    // Si Chat MDI actif et pas encore de participants, pré-charger
+    const rChat = getRoom(p.room);
+    if (rChat.chat && rChat.chat.active && s.data.participants.length === 0) {
+      s.data.participants = Object.values(rChat.chat.participants).map(pp => {
+        const fullName = `${pp.prenom} ${pp.nom}`;
+        return { name: fullName, key: fullName.toLowerCase() };
+      });
+    }
+    console.log(`📝 [ROUE] ${p.room} - Réouverture collecte (${s.data.participants.length} participants)`);
     io.to(p.room).emit("overlay:state", { overlay: "roue_loto", state: "collecting", data: s.data });
   });
 
@@ -1833,6 +1856,23 @@ io.on("connection", (socket) => {
       }
     }
 
+    // Nuage de mots : chaque message alimente le nuage si actif
+    const nuage = r.overlays.nuage_de_mots;
+    if (nuage && nuage.state === "active") {
+      if (!nuage.data.words) nuage.data.words = {};
+      const word = cleanText.trim().toLowerCase();
+      if (word.length >= 2) {
+        const wordParts = word.split(/\s+/).filter(Boolean);
+        if (wordParts.length <= 6 && word.length <= 60) {
+          nuage.data.words[word] = (nuage.data.words[word] || 0) + 1;
+          emitNuageState(room);
+        }
+      }
+    }
+
+    // Canal agnostique raw_vote : emojis_tornado, tug_of_war, decompte_bonhomme, mot_magique
+    io.to(room).emit("raw_vote", { user: author, vote: cleanText });
+
     console.log(`💬 [CHAT MDI] ${room} - ${author}: "${cleanText.substring(0, 50)}"`);
   });
 
@@ -1843,7 +1883,13 @@ io.on("connection", (socket) => {
     const r = getRoom(room);
     if (!r.chat.fastest) return;
     const comm = ensureOverlayState(room, "commentaires");
-    if (comm.state !== "active") return;
+    // Auto-activer commentaires si idle (ne doit pas bloquer silencieusement)
+    if (comm.state === "idle") {
+      comm.state = "active";
+      comm.data.flux = comm.data.flux || [];
+      comm.data.queue = comm.data.queue || [];
+      comm.data.current = null;
+    }
     const f = r.chat.fastest;
     comm.data.current = { id: `fastest_${Date.now()}`, author: `⚡ ${f.author}`, text: "Premier à répondre !" };
     io.to(room).emit("overlay:state", { overlay: "commentaires", state: "active", data: comm.data });
